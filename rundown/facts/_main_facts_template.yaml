@@ -1,0 +1,19 @@
+# rundown facts index — 主 fact 索引.
+#
+# 手动维护: agent/人根据实验结论添加/更新 entry.
+# framework 不自动捕获 (跟「拒绝 3: 不做隐式回落」一致).
+#
+# 状态: confirmed (证实) / pending (待验证) / refuted (证伪) / superseded (被超越)
+#
+# 子 fact 文件路径相对 out_root/_facts/.
+
+facts: []
+
+# --- 模板 entry (复制后改) ---
+# - id: fact_001
+#   title: "<一句话结论标题>"
+#   status: pending
+#   created_at: 2026-10-16
+#   updated_at: 2026-10-16
+#   tags: []
+#   path: fact_001.md

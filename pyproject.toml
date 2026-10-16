@@ -1,0 +1,35 @@
+[project]
+name = "rundown"
+version = "0.1.0"
+description = "声明式运行 · 持久产物 · 为 Agent 而生"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "rundown contributors" }]
+dependencies = [
+    "numpy>=1.23,<2.0",
+    "pandas>=2.0,<3.0",
+    "pyyaml>=6.0",
+    "torch>=2.1",
+    "safetensors>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+# optuna 用于 `experiment run --mode optuna` 智能超参搜索. 不安装 optuna
+# 也能跑实验 (mode=cartesian 是默认且唯一不依赖 optuna 的模式).
+optuna = ["optuna>=3.0"]
+
+[project.scripts]
+rundown = "rundown.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["rundown*", "examples*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "examples"]
+addopts = "-ra -q"

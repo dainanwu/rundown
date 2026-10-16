@@ -1,0 +1,24 @@
+# rundown 实验注册表. 一条记录 = 一个 sweep (笛卡尔积 variants).
+# 一组 trials = 多次 train, 通过 subprocess 调 rundown.cli train 启动.
+#
+# MVP 阶段: 只支持 mode=cartesian (枚举 variants 列表).
+# optuna / TPE search 等 Phase 2.
+#
+# 字段:
+#   dataset          数据集 alias (must exist in configs/datasets.yaml)
+#   model            模型 alias (must exist in configs/models.yaml)
+#   epochs_max       每个 trial 跑几个 epoch
+#   variants         mode=cartesian 枚举这些 variant 名 (顺序跑)
+#   steps_per_epoch / batch_size  可选, 覆盖 engine 默认
+#
+# 注意: variants 必须在 models.yaml 里预先定义 (variant_name -> kwargs).
+
+experiments:
+
+  # ETTh1 LSTM 三种 size 对比 (默认 variants 列表即笛卡尔积)
+  etth1_lstm_size_sweep:
+    dataset: etth1
+    model: lstm
+    epochs_max: 5
+    variants: [small, large, deep]
+    # 3 trials; run_id 格式: etth1_lstm_size_sweep__var{small|large|deep}__seed{0,1,2}

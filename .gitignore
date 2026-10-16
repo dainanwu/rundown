@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# run 产物不进 git; 大, 且不可重建
+artifacts/*/
+!artifacts/.gitkeep
+
+# CAS 散列 (Phase 2 启用)
+data/cas/
+data/raw/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store

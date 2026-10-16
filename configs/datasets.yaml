@@ -1,0 +1,26 @@
+# rundown 数据集注册表. 一条记录 = 一个数据集.
+# 每个 alias 必须通过 rundown.ids.assert_valid 校验 (^[a-z][a-z0-9_]{2,40}$).
+#
+# 字段:
+#   source.kind/path   数据来源 (parquet / csv / measured_csv)
+#   target_col         模型预测的目标列名 (注册时记下, 切分时传给 provider)
+#   provider_factory   dotted path 到 builder 函数, 签名约定:
+#                        builder(source_path, splits, target_col, **overrides)
+#                            -> Dict[str, BatchProvider]  with keys train/val/test
+#   splits             train/val/test 比例 (默认 0.7/0.1/0.2, 求和=1)
+#   feature_cols       可选; provider 可用它挑 batch 的 x 列. 仅作 hint.
+#
+# 用户自有数据集: 拷贝 etth1 entry 改 alias / source.path / target_col,
+# 写一个 builder 函数注册到自己的项目, 然后 provider_factory 指过去.
+
+datasets:
+
+  # ETT (Electricity Transformer Temperature) 小时级 benchmark.
+  # bundled 在 examples/baseline/data/ETTh1.csv, CC0, 17k 行.
+  # 任务: 6 个 power load 特征 -> 预测 OT (Oil Temperature, degC).
+  etth1:
+    source: {kind: csv, path: examples/baseline/data/ETTh1.csv}
+    target_col: OT
+    feature_cols: [HUFL, HULL, MUFL, MULL, LUFL, LULL]
+    provider_factory: examples.baseline.data.build_etth1_providers
+    splits: {train: 0.7, val: 0.2, test: 0.1}
