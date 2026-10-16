@@ -134,14 +134,23 @@ class ModelEntry:
                 f"'module.attr' (e.g. 'myproj.models.Net'), got {self.factory_target!r}"
             )
 
-    def build(self, variant: Optional[str] = None) -> Tuple[Any, Dict[str, Any], Optional[str]]:
+    def build(
+        self,
+        variant: Optional[str] = None,
+        extra_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Any, Dict[str, Any], Optional[str]]:
         """反射绑定: import factory.target 并以 kwargs 实例化. 失败即 ValueError.
 
-        variant 指定 variants 中的 key 时, 把 variant 的 kwargs 合并到
-        factory_kwargs 上 (variant 优先). variant=None 用 base kwargs.
+        kwargs 合并顺序 (后者覆盖前者):
+            1. factory_kwargs      (基础, 来自 YAML models.factory.kwargs)
+            2. variants[variant]   (如果指定 variant, 来自 YAML models.variants)
+            3. extra_kwargs        (CLI --kwargs 透传, optuna sweep 用)
 
         Returns: (model_instance, merged_kwargs, chosen_variant_name).
         caller 用 merged_kwargs 写 manifest; chosen_variant 用于记录.
+
+        注意: extra_kwargs 里不在 factory.target 签名的 key 会让 cls(**)
+        抛 TypeError — 这是用户写错, 不在 registry 层拦截 (宁报错不猜).
         """
         module_path, _, attr = self.factory_target.rpartition(".")
         if not module_path or not attr:
@@ -172,6 +181,8 @@ class ModelEntry:
                 )
             merged_kwargs.update(self.variants[variant])
             chosen_variant = variant
+        if extra_kwargs:
+            merged_kwargs.update(extra_kwargs)
         return cls(**merged_kwargs), merged_kwargs, chosen_variant
 
 

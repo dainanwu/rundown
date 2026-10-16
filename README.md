@@ -306,6 +306,27 @@ rundown analyze --analyzer X <run_id>          # Phase 2 stub
 
 压住 stderr 上的 info 行 (events.jsonl 仍写, 产物完整). 适合 CI / agent 自动化调用.
 
+### `--kwargs KEY=VALUE` — 透传任意超参给 model factory
+
+`models.variants` 是**便捷预设**（`small` / `large` / `deep` 是常见 size 组合）。
+**optuna sweep 或临时超参**用 `--kwargs` 自由传, 绕过 variants 限制:
+
+```bash
+# 透传多个 — 合并顺序: factory_kwargs < variants < --kwargs (后者覆盖)
+uv run rundown train --model lstm --variant small \
+  --kwargs hidden=128 --kwargs num_layers=2
+
+# optuna 调 rundown 时 (任意超参, 不用预注册 variant)
+uv run rundown train --model lstm \
+  --kwargs hidden=$HIDDEN --kwargs lr=$LR
+```
+
+值类型自动判断: `int` / `float` / `bool` / `str`.
+
+不存在的 kwargs key → factory 自己抛 `TypeError` (不静默吃掉 — 跟「拒绝 3: 不擅自替你修」一致).
+
+`--kwargs` 不影响 code snapshot hash — 同代码不同 kwargs → 同 sha → 自动 dedupe.
+
 ```bash
 # 任何位置都生效 (argparse 限制绕过, main() 手动从 argv 抓)
 rundown train ... --quiet

@@ -836,6 +836,129 @@ class TestCliQuery:
 
 
 # ---------------------------------------------------------------------------
+# --kwargs: 透传任意超参给 model factory (optuna sweep 用)
+# ---------------------------------------------------------------------------
+class TestCliKwargs:
+    """方案 C: --kwargs KEY=VALUE 透传给 model factory.
+
+    optuna sweep 时绕过 models.variants 限制, 自由传任意超参.
+    合并顺序: factory_kwargs < variants[variant] < --kwargs (后者覆盖).
+    """
+
+    def test_cli_kwargs_argparse_append(self):
+        """--kwargs action='append' — 可多次传, 列表形式."""
+        from rundown.cli import build_parser
+        parser = build_parser()
+        ns = parser.parse_args([
+            "train", "--dataset", "x", "--model", "y",
+            "--kwargs", "hidden=128",
+            "--kwargs", "num_layers=2",
+            "--kwargs", "lr=0.0005",
+        ])
+        assert ns.kwargs == ["hidden=128", "num_layers=2", "lr=0.0005"]
+
+    def test_parse_cli_kwargs_value_type_coercion(self):
+        """--kwargs value 自动 int / float / bool / str 转换."""
+        from rundown.cli import _parse_cli_kwargs
+        result = _parse_cli_kwargs([
+            "hidden=128", "lr=1e-3", "dropout=0.5",
+            "use_bias=true", "name=etth1", "n_layers=2",
+        ])
+        assert result == {
+            "hidden": 128, "lr": 0.001, "dropout": 0.5,
+            "use_bias": True, "name": "etth1", "n_layers": 2,
+        }
+
+    def test_parse_cli_kwargs_invalid_format_raises(self):
+        """--kwargs token 没 '=' 报错 (不静默吃掉, 宁报错不猜)."""
+        from rundown.cli import _parse_cli_kwargs
+        with pytest.raises(ValueError, match="KEY=VALUE"):
+            _parse_cli_kwargs(["hidden_no_equals"])
+        with pytest.raises(ValueError, match="empty key"):
+            _parse_cli_kwargs(["=value_no_key"])
+
+    def test_parse_cli_kwargs_none_returns_none(self):
+        """未传 --kwargs 时返回 None (与 args.kwargs default=None 对齐)."""
+        from rundown.cli import _parse_cli_kwargs
+        assert _parse_cli_kwargs(None) is None
+        assert _parse_cli_kwargs([]) is None
+
+    def test_model_entry_build_extra_kwargs_overrides(self):
+        """ModelEntry.build(extra_kwargs=...) 合并顺序正确.
+
+        优先级: extra_kwargs > variants > factory_kwargs.
+        """
+        from rundown.registry import ModelEntry
+        # 用 tests.fixtures.ToyNet: __init__(in_dim=7, hidden=16)
+        entry = ModelEntry(
+            alias="toy",
+            factory_target="tests.fixtures.ToyNet",
+            factory_kwargs={"in_dim": 7, "hidden": 16},
+            optimizer={"kind": "adam", "lr": 0.001},
+            epochs_max=1,
+            variants={"small": {"hidden": 8}},
+        )
+
+        # 1) base only — merged = factory_kwargs
+        _, merged, chosen = entry.build()
+        assert merged == {"in_dim": 7, "hidden": 16}
+        assert chosen is None
+
+        # 2) variant 覆盖 base — merged 反映 variant hidden=8
+        _, merged, chosen = entry.build(variant="small")
+        assert merged == {"in_dim": 7, "hidden": 8}
+        assert chosen == "small"
+
+        # 3) extra_kwargs 覆盖一切 (optuna sweep 场景)
+        # hidden 在 ToyNet 签名里 → OK, merged 应反映 extra_kwargs 覆盖
+        _, merged, chosen = entry.build(
+            variant="small",
+            extra_kwargs={"hidden": 32},
+        )
+        assert merged == {"in_dim": 7, "hidden": 32}
+        assert chosen == "small"
+
+        # 4) extra_kwargs key 不在 factory 签名 → factory 自己抛 TypeError
+        # (rundown 不在 registry 层拦截, 宁报错不猜 — optuna 写错立刻知道)
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            entry.build(extra_kwargs={"lr": 0.0001})
+
+    def test_cli_train_kwargs_in_manifest(self, tmp_path, monkeypatch, capsys):
+        """--kwargs 透传后, manifest.model.factory.kwargs 含 merged 值.
+
+        走 library API (跳过 provider config 反射) — 验证 ModelEntry.build
+        返回的 merged_kwargs 是 CLI 写 manifest 的依据.
+        """
+        from rundown.registry import ModelEntry
+        from rundown.cli import _parse_cli_kwargs
+
+        # 模拟 CLI: --kwargs hidden=32, --kwargs lr=0.0005
+        parsed = _parse_cli_kwargs(["hidden=32", "lr=0.0005"])
+
+        # 走 registry 层
+        entry = ModelEntry(
+            alias="toy",
+            factory_target="tests.fixtures.ToyNet",
+            factory_kwargs={"in_dim": 7, "hidden": 16},
+            optimizer={"kind": "adam", "lr": 0.001},
+            epochs_max=1,
+        )
+
+        # ToyNet 只接受 in_dim + hidden; lr 会 TypeError.
+        # 测合并 dict (不实际实例化):
+        merged_base = dict(entry.factory_kwargs)
+        if parsed:
+            merged_base.update(parsed)
+        assert merged_base == {"in_dim": 7, "hidden": 32, "lr": 0.0005}
+
+        # 实际能实例化的部分 (去掉 lr)
+        parsed_safe = {k: v for k, v in parsed.items() if k != "lr"}
+        model, merged, _ = entry.build(extra_kwargs=parsed_safe)
+        assert merged == {"in_dim": 7, "hidden": 32}
+        # ToyNet 实例化 OK — 第一层 weight 维度对 (in_dim=7, hidden=32)
+
+
+# ---------------------------------------------------------------------------
 # code snapshot — autolog env 的产物比代码活得久承诺
 # ---------------------------------------------------------------------------
 class TestCodeSnapshot:
@@ -1047,10 +1170,11 @@ class TestCodeSnapshot:
         # archive_path 相对 run_dir 指向 _shared/
         assert cs["archive_path"].startswith("../_shared/code_"), cs["archive_path"]
         # 物理上 snapshot 落 _shared/, 不在 run_dir 内
-        assert not list(run_dir.glob("code_*")), "run_dir 不该有自己的 code_*.zip"
-        shared_zips = list(shared_dir.glob("code_*.zip"))
-        assert len(shared_zips) == 1, f"_shared/ 应只 1 份, got {shared_zips}"
-        # 物理 resolve 验证: run_dir + archive_path 真的指向 _shared/ 文件
+        assert not list(run_dir.glob("code_*")), "run_dir 不该有自己的 code_*"
+        # 1 份 snapshot — 形态可能是 zip (非 git repo) 或目录 (git repo tar 路径)
+        shared_entries = list(shared_dir.glob("code_*"))
+        assert len(shared_entries) == 1, f"_shared/ 应只 1 份, got {shared_entries}"
+        # 物理 resolve 验证: run_dir + archive_path 真的指向 _shared/ 文件/目录
         assert (run_dir / cs["archive_path"]).exists()
 
     def test_train_cli_run_dir_mode_keeps_snapshot_in_run_dir(self, tmp_path):

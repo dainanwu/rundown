@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     tp.add_argument("--snapshot-from-pool", type=Path, default=None,
                     help="experiment sweep 共享 snapshot meta.json 路径. "
                          "给定时跳过自建, 直接引用. 不传 → 自己建.")
+    tp.add_argument("--kwargs", action="append", default=None, metavar="KEY=VALUE",
+                    help="透传任意 kwargs 给 model factory (e.g. hidden=128 num_layers=2 lr=0.001). "
+                         "可多次. 合并顺序: factory_kwargs < variants < --kwargs (后者覆盖). "
+                         "optuna sweep 时绕过 variants 限制, 自由传任意超参. "
+                         "key 不在 factory 签名时由 factory 抛 TypeError (不静默).")
 
     ep = sub.add_parser("experiment", parents=[quiet],
                         help="跑一个注册过的实验 (默认笛卡尔积 sweep; mode=optuna 切换)")
@@ -155,6 +160,48 @@ def _load_external_snapshot(meta_path: Optional[Path], run_dir: Path) -> Optiona
     return info
 
 
+def _parse_cli_kwargs(raw: Optional[List[str]]) -> Optional[Dict[str, Any]]:
+    """解析 `--kwargs KEY=VALUE` token 列表 → dict.
+
+    值类型自动判断: int / float / bool / str. 不在 factory 签名的 key 不拦截
+    (让 factory 自己抛 TypeError — 宁报错不猜).
+
+    返回 None 表示「未传 --kwargs」(不是「传了空 dict」) —
+    ModelEntry.build 把它跟 None 走同一条分支, 行为一致.
+    """
+    if not raw:
+        return None
+    out: Dict[str, Any] = {}
+    for token in raw:
+        if "=" not in token:
+            raise ValueError(
+                f"--kwargs token must be 'KEY=VALUE', got {token!r}"
+            )
+        key, _, val_s = token.partition("=")
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--kwargs token has empty key: {token!r}")
+        out[key] = _coerce_scalar(val_s)
+    return out
+
+
+def _coerce_scalar(s: str) -> Any:
+    """字符串 → int / float / bool / str (按 Python 字面量)."""
+    s = s.strip()
+    if s.lower() in ("true", "false"):
+        return s.lower() == "true"
+    # int 先, 再 float (避免 '1.0' 被解析成 int=1)
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
+
+
 def _cmd_train(args: argparse.Namespace) -> int:
     """End-to-end: registry -> provider -> model -> engine -> artifact.
 
@@ -197,9 +244,13 @@ def _cmd_train(args: argparse.Namespace) -> int:
     except ValueError as e:
         return _err(f"failed to build providers for {args.dataset!r}: {e}")
 
-    # 实例化 model (variant 走 entry.build(variant=))
+    # 实例化 model (variant + --kwargs 透传给 factory).
+    # kwargs 合并顺序: factory_kwargs < variants[variant] < CLI --kwargs.
     try:
-        model, merged_kwargs, chosen_variant = model_entry.build(variant=args.variant)
+        model, merged_kwargs, chosen_variant = model_entry.build(
+            variant=args.variant,
+            extra_kwargs=_parse_cli_kwargs(args.kwargs),
+        )
     except ValueError as e:
         return _err(f"failed to instantiate model {args.model!r}: {e}")
 
