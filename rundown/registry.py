@@ -103,11 +103,20 @@ class DatasetEntry:
 
 @dataclass
 class ModelEntry:
+    """一个模型 = PyTorch 类 + 默认 kwargs + 便捷 variants.
+
+    设计边界 (跟 experiments.yaml 的区别):
+      - factory.target:   PyTorch 类引用 (必填)
+      - factory.kwargs:   固定结构 kwargs (数据集决定的, 如 in_dim)
+      - variants:         便捷预设 (同一模型不同 size 组合, --variant 用)
+      - ❌ optimizer:     不在 models — experiments 控制 (或 defaults.DEFAULT_OPTIMIZER)
+      - ❌ epochs_max:    不在 models — experiments 控制 (或 defaults.DEFAULT_EPOCHS_MAX)
+
+    --kwargs CLI 透传 (方案 C) 跟 variants 互补: variants 是预设, --kwargs 自由.
+    """
     alias: str
     factory_target: str
     factory_kwargs: Dict[str, Any]
-    optimizer: Dict[str, Any]
-    epochs_max: int
     variants: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -232,8 +241,6 @@ def load_models(configs_dir: Path = Path("configs")) -> Dict[str, ModelEntry]:
             alias=alias,
             factory_target=str(fac["target"]),
             factory_kwargs=fac.get("kwargs", {}) or {},
-            optimizer=body.get("optimizer", {"kind": "adam", "lr": 1e-3}) or {},
-            epochs_max=int(body.get("epochs_max", 100)),
             variants=body.get("variants", {}) or {},
         )
     return out

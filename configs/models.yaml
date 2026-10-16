@@ -1,14 +1,21 @@
-# rundown 模型注册表. 一条记录 = 一个模型.
-# factory.target 在加载时立即 import 校验; 找不到即 ValueError.
+# rundown 模型注册表. 一条记录 = 一个 PyTorch 类 + 默认 kwargs.
 #
 # 字段:
 #   factory.target   dotted path to class/function, 必须可调用接受 kwargs.
-#   factory.kwargs   传给 factory 的 kwargs.
-#   optimizer        {kind, lr[, weight_decay]} (MVP 仅 Adam)
-#   epochs_max       默认训练 epoch 上限; CLI --epochs-max 可覆盖.
+#   factory.kwargs   传给 factory 的 kwargs (固定结构, 如 in_dim).
 #   variants         可选; variant_name -> kwargs override.
-#                    同一 alias 不同超参组合, CLI --variant <name> 切换.
+#                    便捷预设 — 同一模型不同 size 组合, CLI --variant <name> 用.
 #                      e.g. variants: {small: {hidden: 32}, large: {hidden: 128}}
+#
+# 不在 models.yaml 的字段 (边界明确):
+#   ❌ optimizer  — 默认训练配置在 defaults.DEFAULT_OPTIMIZER; sweep 时由
+#                    experiments.yaml.optimizer 覆盖, 或 --lr 临时覆盖.
+#   ❌ epochs_max — 训练时长不在 models (不是模型属性); sweep 时由
+#                    experiments.yaml.epochs_max 决定, 单次 train 用 defaults.
+#   ❌ dataset    — 数据集归属 experiments, 不归 models.
+#
+# 自由透传: rundown train --model X --kwargs hidden=128 --kwargs lr=0.0005
+#   (绕过 variants 限制, optuna sweep 用 — 见方案 C)
 #
 # 用户自有模型: 拷贝 lstm entry, 改 alias / factory.target / kwargs.
 
@@ -20,8 +27,6 @@ models:
     factory:
       target: examples.baseline.model.SequenceLSTM
       kwargs: {in_dim: 6, hidden: 64, num_layers: 2}
-    optimizer: {kind: adam, lr: 0.001}
-    epochs_max: 15
     variants:
       small:  {hidden: 32, num_layers: 1}
       large:  {hidden: 128, num_layers: 2}

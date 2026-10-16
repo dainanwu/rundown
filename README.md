@@ -225,16 +225,16 @@ models:
     factory:
       target: examples.baseline.model.SequenceLSTM
       kwargs: {in_dim: 6, hidden: 64, num_layers: 2}
-    optimizer: {kind: adam, lr: 0.001}
-    epochs_max: 15
-    variants:                    # 同一 alias 不同超参组合
+    variants:                    # 便捷预设 — 同一模型不同 size 组合
       small: {hidden: 32, num_layers: 1}
       large: {hidden: 128, num_layers: 2}
       deep:  {hidden: 64, num_layers: 3}
 ```
 
 - `factory.target` 反射绑定, 注册时立即校验
-- `variants` 列模型变体, CLI `--variant large` 切换
+- `factory.kwargs` 固定结构 (数据集决定的, 如 `in_dim`)
+- `variants` 便捷预设 — CLI `--variant large` 切换
+- **不在 models.yaml**: `optimizer` / `epochs_max` / `dataset` / 训练超参 — 见下方边界表
 
 ### 3. Experiment (configs/experiments.yaml) — sweep
 
@@ -245,8 +245,11 @@ experiments:
     dataset: etth1
     model: lstm
     epochs_max: 5
-    variants: [small, large, deep]
+    optimizer: {kind: adam, lr: 0.001}    # 可选, 不写走 defaults.DEFAULT_OPTIMIZER
+    variants: [small, large, deep]        # 引用 models.lstm.variants 的 key
 ```
+
+跑 sweep:
 
 跑 sweep:
 
@@ -269,6 +272,31 @@ uv run rundown experiment run etth1_lstm_size_sweep
 [summary] best: variant=large  seed=1  best_val_mse=2.08  run_id=lstm__varlarge__etth1__seed1
           reproduce: rundown train --dataset etth1 --model lstm --variant large --seed 1 --epochs-max 5 --out-dir <same out_root>
 ```
+
+### models vs experiments 边界
+
+| 字段 | 归属 | 谁消费 | 例 |
+|------|------|--------|-----|
+| `factory.target` | **models** | registry 反射 | `examples.baseline.model.SequenceLSTM` |
+| `factory.kwargs` | **models** | `cls(**kwargs)` | `{in_dim: 6}` (固定结构) |
+| `variants` | **models** | `--variant large` | `{small: {hidden: 32}, large: {hidden: 128}}` (便捷预设) |
+| `optimizer` (默认) | defaults.py | 单次 train fallback | `defaults.DEFAULT_OPTIMIZER = {kind: adam, lr: 1e-3}` |
+| `optimizer` (覆盖) | **experiments** | sweep 子进程 | `optimizer: {kind: adam, lr: 0.0005}` |
+| `dataset` | **experiments** | provider 反射 | `etth1` |
+| `model` | **experiments** | registry 查 | `lstm` |
+| `epochs_max` | **experiments** | engine | `5` (sweep 跑短点) |
+| `batch_size` / `steps_per_epoch` | **experiments** | engine / provider | 覆盖默认 |
+| `variants` (列表) | **experiments** | sweep 笛卡尔积 | `[small, large, deep]` (引用 models 的 key) |
+| `--kwargs key=value` | CLI 透传 | engine.fit | optuna sweep 自由传 |
+
+**核心原则**:
+
+- **models** = 「一个 PyTorch 类 + 默认 kwargs + 便捷预设」。它不知道训练时长、不知道用哪个 optimizer、不知道跑什么数据集。
+- **experiments** = 「一次 sweep 的设置」。它决定用哪个 model/dataset/optimizer，训练多久，sweep 哪些 variant。
+- **defaults.py** = 「单次 `rundown train`（无 experiment）的单点真值」。sweep 时由 experiment 覆盖。
+- **`--kwargs`** = 「runtime 透传，跟 YAML 正交」。optuna / agent 用，绕过 variants 限制。
+
+**老 config 向后兼容**: models.yaml 里的 `optimizer:` / `epochs_max:` 字段会被静默忽略（不再读）。新 config 应该删掉这些字段——见 `test_load_models_ignores_optimizer_field`。
 
 ### 复现 best trial
 
@@ -367,6 +395,81 @@ rundown compare lstm__etth1__seed0 cnn__etth1__seed0
 ```
 
 list-runs 走文件系统 (`glob artifacts/*/manifest.yaml`), 不建 DB——manifest 自己就是索引.
+
+### 读一个 run: `inspect` — README-style markdown
+
+`list-runs` 给一行摘要; `inspect` 给一份完整 README: 跑这次的目的 / 设置 / 环境 / 结果 / 怎么复算 / 产物清单. stdout 是 markdown, 直接重定向到 `.md` 文件.
+
+```bash
+# 单个 run
+rundown inspect lstm__varsmall__etth1__seed0 > lstm__varsmall__etth1__seed0.md
+
+# 批量 (按创建时间过滤最近 7 天)
+rundown inspect --all --since-days 7 > weekly_runs.md
+
+# 批量 + 按 dataset / model / variant 过滤
+rundown inspect --all --dataset etth1 --model lstm --variant small
+```
+
+输出例子 (节选):
+
+````markdown
+# Run: `lstm__varsmall__etth1__seed0`
+_2026-10-17T00:38:50_
+
+## Purpose
+Predict `OT` 25 steps ahead on `etth1` using `lstm/small`.
+
+## Setup
+- **Dataset**: `etth1` (csv, target `OT`)
+  - splits: train=0.7 / val=0.2 / test=0.1
+- **Model**: `lstm` / variant=`small`
+  - factory: `examples.baseline.model.SequenceLSTM`
+  - kwargs: in_dim=6, hidden=32, num_layers=1
+- **Config**: epochs_max=5, steps_per_epoch=50, optimizer=adam(lr=0.001)
+- **Seed**: 0
+
+## Results
+| metric | value |
+| --- | --- |
+| best_val_mse | 2.7334 |
+| epochs_to_best | 4 |
+| epochs_actual | 5 |
+
+### Loss curves
+| epoch | train_loss | val_mse | best? |
+| --- | --- | --- | --- |
+| 1 | 0.7528 | 3.2733 |  |
+| 2 | 0.5969 | 4.1101 |  |
+| 4 | 0.5421 | 2.7334 | BEST |
+
+## How to evaluate
+```python
+from rundown.inspect_run import load_run, render_run_markdown
+run = load_run(r'artifacts\lstm__varsmall__etth1__seed0')
+print(render_run_markdown(run))
+```
+
+Or re-train with identical code:
+```bash
+git checkout 1b5e06c
+uv run rundown train --dataset etth1 --model lstm --variant small --seed 0 \
+    --epochs-max 5 --out-dir artifacts
+```
+
+## Artifacts on disk
+- `curves.safetensors` (176B)
+- `manifest.yaml` (1.5KB)
+- `predictions/test_best.safetensors` (6.4KB)
+- `weights.safetensors` (20.6KB)
+- `weights_best.safetensors` (20.6KB)
+````
+
+设计哲学:
+- **read-only** — 不动 `artifacts/`, 不写日志, 不创建文件 (除非你 `>` redirect).
+- **降级** — 缺 `pyyaml` / `safetensors` 时只读 `manifest.yaml`, 仍然能渲染 Setup / Environment / Results 段.
+- **agent 友好** — stdout 是干净 markdown, 可以 `cat` / `grep` / 喂给 LLM.
+- **Python 入口** — `from rundown.inspect_run import load_run, render_run_markdown` 直接当 lib 用, 不一定要 CLI.
 
 ---
 

@@ -200,12 +200,57 @@ class TestRegistry:
         (cfg / "models.yaml").write_text(
             "models:\n"
             "  bad_target:\n"
-            "    factory: {target: not-a-dotted-path}\n"
-            "    optimizer: {kind: adam, lr: 0.001}\n",
+            "    factory: {target: not-a-dotted-path}\n",
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="dotted path"):
             load_models(cfg)
+
+    def test_load_models_ignores_optimizer_field(self, tmp_path):
+        """models.yaml 含 optimizer/epochs_max → 静默忽略 (边界已重设计).
+
+        不抛错, 也不读这些字段. 警告 user via load_models 不弹错 — 因为有些
+        user 可能还有老配置, 静默忽略保证向后兼容 (但 manifest.config.optimizer
+        会用 defaults.DEFAULT_OPTIMIZER).
+        """
+        from rundown.registry import load_models
+        cfg = tmp_path / "configs"
+        cfg.mkdir()
+        (cfg / "models.yaml").write_text(
+            "models:\n"
+            "  legacy:\n"
+            "    factory: {target: tests.fixtures.ToyNet, kwargs: {in_dim: 7, hidden: 16}}\n"
+            "    optimizer: {kind: adam, lr: 0.001}\n"   # 老字段, 应忽略
+            "    epochs_max: 15\n",                    # 老字段, 应忽略
+            encoding="utf-8",
+        )
+        models = load_models(cfg)
+        assert "legacy" in models
+        # ModelEntry 不再有 optimizer / epochs_max 属性
+        assert not hasattr(models["legacy"], "optimizer")
+        assert not hasattr(models["legacy"], "epochs_max")
+        # build() 仍然能反射 + 实例化
+        from tests.fixtures import ToyNet
+        instance, merged, _ = models["legacy"].build()
+        assert isinstance(instance, ToyNet)
+
+    def test_model_entry_no_optimizer_or_epochs_max(self):
+        """ModelEntry 字段只有 alias/factory_target/factory_kwargs/variants.
+
+        锁住「边界已重设计」: optimizer/epochs_max 不在 models, 防止以后误加回来.
+        """
+        from dataclasses import fields as dc_fields
+        field_names = {f.name for f in dc_fields(ModelEntry)}
+        assert field_names == {"alias", "factory_target", "factory_kwargs", "variants"}, (
+            f"ModelEntry 字段变了: {field_names}"
+        )
+
+    def test_defaults_optimizer_is_single_source(self):
+        """DEFAULT_OPTIMIZER 是单点真值, 单次 train 的 fallback."""
+        from rundown.defaults import DEFAULT_OPTIMIZER, DEFAULT_LR
+        assert DEFAULT_OPTIMIZER["kind"] == "adam"
+        assert DEFAULT_OPTIMIZER["lr"] == DEFAULT_LR
+        assert isinstance(DEFAULT_OPTIMIZER, dict)
 
     def test_model_entry_build_reflective(self):
         """反射绑定到 tests.fixtures.ToyNet, 验证不抛错 + 返回 (model, kwargs, variant) tuple."""
@@ -213,8 +258,6 @@ class TestRegistry:
             alias="toy",
             factory_target="tests.fixtures.ToyNet",
             factory_kwargs={"in_dim": 7, "hidden": 16},
-            optimizer={"kind": "adam", "lr": 0.001},
-            epochs_max=3,
         )
         model, merged_kwargs, chosen_variant = me.build()
         from tests.fixtures import ToyNet
@@ -228,8 +271,6 @@ class TestRegistry:
             alias="toy",
             factory_target="tests.fixtures.ToyNet",
             factory_kwargs={"in_dim": 7, "hidden": 16},
-            optimizer={"kind": "adam", "lr": 0.001},
-            epochs_max=3,
             variants={"big": {"hidden": 64}},
         )
         model, merged_kwargs, chosen_variant = me.build(variant="big")
@@ -241,8 +282,6 @@ class TestRegistry:
             alias="toy",
             factory_target="tests.fixtures.ToyNet",
             factory_kwargs={"in_dim": 7, "hidden": 16},
-            optimizer={"kind": "adam", "lr": 0.001},
-            epochs_max=1,
             variants={"big": {"hidden": 64}},
         )
         with pytest.raises(ValueError, match="variant 'medium' not declared"):
@@ -253,8 +292,6 @@ class TestRegistry:
             alias="bad",
             factory_target="nonexistent.module.NopeNet",
             factory_kwargs={},
-            optimizer={"kind": "adam", "lr": 0.001},
-            epochs_max=1,
         )
         with pytest.raises(ValueError, match="cannot import"):
             me.build()
@@ -894,8 +931,6 @@ class TestCliKwargs:
             alias="toy",
             factory_target="tests.fixtures.ToyNet",
             factory_kwargs={"in_dim": 7, "hidden": 16},
-            optimizer={"kind": "adam", "lr": 0.001},
-            epochs_max=1,
             variants={"small": {"hidden": 8}},
         )
 
@@ -940,8 +975,6 @@ class TestCliKwargs:
             alias="toy",
             factory_target="tests.fixtures.ToyNet",
             factory_kwargs={"in_dim": 7, "hidden": 16},
-            optimizer={"kind": "adam", "lr": 0.001},
-            epochs_max=1,
         )
 
         # ToyNet 只接受 in_dim + hidden; lr 会 TypeError.

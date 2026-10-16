@@ -1,8 +1,11 @@
-"""CLI: 4 个动词. prepare / train / read-run / analyze.
+"""CLI: 8 个动词. prepare / train / experiment / read-run / list-runs / compare / inspect / analyze.
 
 MVP 状态:
   - prepare / train: 跑通骨架 (synthetic data, 见 rundown.engine).
+  - experiment: sweep — subprocess 调 train, stdout 拿 run_id, 共享 _shared/ pool.
   - read-run: 读 manifest + 从 predictions/*.safetensors 算简单指标.
+  - list-runs / compare: glob artifacts/*/manifest.yaml 直接读, 不建 DB.
+  - inspect: read-only render run → README-style markdown 到 stdout.
   - analyze: stub, Phase 2.
 """
 from __future__ import annotations
@@ -24,7 +27,7 @@ def _quiet_parser() -> argparse.ArgumentParser:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="rundown",
-        description="声明式运行 · 持久产物. 命令: prepare / train / experiment / read-run / analyze.",
+        description="声明式运行 · 持久产物. 命令: prepare / train / experiment / read-run / list-runs / compare / inspect / analyze.",
     )
     quiet = _quiet_parser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -40,13 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="选择 models.yaml 里的 variants 之一 (e.g. small/large/deep)")
     tp.add_argument("--seed", type=int, default=0)
     tp.add_argument("--epochs-max", type=int, default=None,
-                    help="覆盖 models.yaml 的 epochs_max (smoke 用)")
+                    help="训练时长 (epoch 数). 不传 → defaults.DEFAULT_EPOCHS_MAX "
+                         "(experiments.yaml 里设会覆盖 defaults)")
     tp.add_argument("--steps-per-epoch", type=int, default=None,
                     help="每个 epoch 跑多少 batch; 默认 50")
     tp.add_argument("--batch-size", type=int, default=None,
                     help="覆盖 provider 默认 batch_size")
     tp.add_argument("--lr", type=float, default=None,
-                    help="覆盖 models.yaml 的 optimizer.lr")
+                    help="覆盖 optimizer.lr (experiments.yaml.optimizer.lr 也覆盖这里)")
     tp.add_argument("--out-dir", type=Path, default=None,
                     help="artifacts 根目录; CLI 自动加 run_id 子目录")
     tp.add_argument("--run-dir", type=Path, default=None,
@@ -100,6 +104,20 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("run_id_a")
     cp.add_argument("run_id_b")
     cp.add_argument("--root", type=Path, default=Path("artifacts"))
+
+    ip = sub.add_parser("inspect", parents=[quiet],
+                        help="读 run artifact(s), 输出 README-style markdown 到 stdout")
+    ip.add_argument("run_id", nargs="?",
+                    help="Run id (例如 lstm__varsmall__etth1__seed0) 或直接路径")
+    ip.add_argument("--root", default="artifacts", type=Path,
+                    help="Artifacts 根目录 (default: ./artifacts)")
+    ip.add_argument("--all", action="store_true",
+                    help="迭代 --root 下所有 run (可配 --since-days / --dataset / --model / --variant)")
+    ip.add_argument("--since-days", type=int, default=None,
+                    help="与 --all 同用: 只看最近 N 天的 run")
+    ip.add_argument("--dataset", default=None, help="--all: 过滤 dataset.alias")
+    ip.add_argument("--model", default=None, help="--all: 过滤 model.alias")
+    ip.add_argument("--variant", default=None, help="--all: 过滤 model.variant")
 
     return p
 
@@ -254,10 +272,15 @@ def _cmd_train(args: argparse.Namespace) -> int:
     except ValueError as e:
         return _err(f"failed to instantiate model {args.model!r}: {e}")
 
-    # EngineConfig: CLI 覆盖 > models.yaml 默认
-    from .defaults import DEFAULT_STEPS_PER_EPOCH
-    epochs_max = args.epochs_max if args.epochs_max is not None else model_entry.epochs_max
-    lr = args.lr if args.lr is not None else float(model_entry.optimizer.get("lr", 1e-3))
+    # EngineConfig: CLI 覆盖 > defaults 单点真值
+    # (models.yaml 不再含 optimizer/epochs_max — 单点真值在 defaults,
+    #  sweep 时由 experiments.yaml 覆盖并通过 subprocess CLI 透传过来.)
+    from .defaults import DEFAULT_STEPS_PER_EPOCH, DEFAULT_EPOCHS_MAX, DEFAULT_OPTIMIZER
+    epochs_max = args.epochs_max if args.epochs_max is not None else DEFAULT_EPOCHS_MAX
+    optimizer = dict(DEFAULT_OPTIMIZER)  # 拷贝, 防止 manifest.config 共享引用
+    if args.lr is not None:
+        optimizer["lr"] = args.lr
+    lr = float(optimizer["lr"])
     steps_per_epoch = args.steps_per_epoch if args.steps_per_epoch is not None else DEFAULT_STEPS_PER_EPOCH
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -315,7 +338,7 @@ def _cmd_train(args: argparse.Namespace) -> int:
         config={
             "epochs_max": int(epochs_max),
             "steps_per_epoch": int(steps_per_epoch),
-            "optimizer": model_entry.optimizer,
+            "optimizer": optimizer,
             "lr": lr,
         },
     )
@@ -544,8 +567,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _cmd_list_runs(args)
     if args.cmd == "compare":
         return _cmd_compare(args)
-    parser.error(f"unknown cmd: {args.cmd}")
-    return 2
+    if args.cmd == "inspect":
+        from .inspect_run import main as _inspect_main
+        # re-build argv from argparse namespace → matches inspect_run's argparse
+        argv: List[str] = []
+        if args.run_id:
+            argv.append(args.run_id)
+        argv += ["--root", str(args.root)]
+        if getattr(args, "all", False):
+            argv.append("--all")
+        if getattr(args, "since_days", None) is not None:
+            argv += ["--since-days", str(args.since_days)]
+        if getattr(args, "dataset", None):
+            argv += ["--dataset", args.dataset]
+        if getattr(args, "model", None):
+            argv += ["--model", args.model]
+        if getattr(args, "variant", None):
+            argv += ["--variant", args.variant]
+        if getattr(args, "quiet", False):
+            argv.append("--quiet")
+        return _inspect_main(argv)
+    parser.error(f"unknown cmd: {args.cmd}")  # parser.error calls sys.exit(2)
 
 
 if __name__ == "__main__":

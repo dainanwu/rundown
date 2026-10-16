@@ -2,16 +2,23 @@
 # 一组 trials = 多次 train, 通过 subprocess 调 rundown.cli train 启动.
 #
 # MVP 阶段: 只支持 mode=cartesian (枚举 variants 列表).
-# optuna / TPE search 等 Phase 2.
+# optuna / TPE search 等 Phase 2 (用 --kwargs 自由透传实现).
 #
-# 字段:
+# 字段 (跟 models.yaml 的边界):
 #   dataset          数据集 alias (must exist in configs/datasets.yaml)
 #   model            模型 alias (must exist in configs/models.yaml)
 #   epochs_max       每个 trial 跑几个 epoch
 #   variants         mode=cartesian 枚举这些 variant 名 (顺序跑)
-#   steps_per_epoch / batch_size  可选, 覆盖 engine 默认
+#                    — 引用 models.yaml 里该 model 的 variants, 不重定义.
+#   steps_per_epoch  可选, 覆盖 engine 默认 50
+#   batch_size       可选, 覆盖 provider 默认
+#   optimizer        可选, {kind, lr[, weight_decay]} — 覆盖 defaults.DEFAULT_OPTIMIZER
+#                    例: {kind: adam, lr: 0.0005} (sweep 用更低 lr 探索)
+#                    sweep 内通过 subprocess CLI 透传给每个 trial.
 #
-# 注意: variants 必须在 models.yaml 里预先定义 (variant_name -> kwargs).
+# 不在 experiments 的字段:
+#   ❌ factory.target / factory.kwargs — 这些在 models.yaml
+#   ❌ hidden / num_layers 等 — models.variants 是预设, --kwargs 是自由透传
 
 experiments:
 
@@ -20,5 +27,6 @@ experiments:
     dataset: etth1
     model: lstm
     epochs_max: 5
+    optimizer: {kind: adam, lr: 0.001}     # 可选, 不写走 defaults.DEFAULT_OPTIMIZER
     variants: [small, large, deep]
-    # 3 trials; run_id 格式: etth1_lstm_size_sweep__var{small|large|deep}__seed{0,1,2}
+    # 3 trials; run_id 格式: lstm__var{small|large|deep}__etth1__seed{0,1,2}
