@@ -10,6 +10,34 @@ rundown 把"一个数据集 + 一个模型 + 一个实验"的 YAML 描述变成�
 
 ---
 
+## 为什么
+
+你跑 ML 算法/模型实验, 半年后想回看「这个数字是哪次跑出来的」. 这件事 5 个维度都会痛:
+
+1. **历史混淆** — 第 3 次跑 lr 是 0.001 还是 0.0005? 老 commit 改了 num_layers 没有? 你靠
+   git log + 屏幕截图 + Onenote 自答, **明年这些记忆不在**.
+
+2. **可复算压力** — 论文盲审要代码 + 数字, 你从 git 挖目录, 6 个月后你自己认不出哪次跑对应
+   哪个数字. reviewer 看你「流程不严谨」.
+
+3. **本地 anchor 散乱** — 三个月一过, 路径 `~/Downloads/exp123_v3/checkpoints/` 跟
+   `~/projects/ml/exp_v3_2024_10/checkpoints/` 是同一回事吗? 你自己都忘了哪个对应论文哪个表格.
+
+4. **agent / 人工协作** — agent 临时改了 `foo.py` 又改回, 你 PR review 时分不清「agent 写的部分」
+   跟「你加的部分」. 见下面「目录布局约定」段 (`## 目录布局约定`) 怎么解.
+
+5. **sweep 完找 best** — 跑 50 次 sweep, 哪个 best? 屏幕截图? `grep`? 不可重现的 workflow.
+
+这些维度每个都让人感到「浪费时间」— 你应该花在算法上, 不是 archaeology.
+
+**rundown 的作用域很窄**: 解决第 1-5 条 (把 1 次跑 round-trip 化), 不解决 ML 算法本身的难题
+(那是 PyTorch / Optuna 的活). 一次性跑出来的目录, 6 个月后让 reviewer 或 future-you
+完整复算 + 验证 + 对比.
+
+下面告诉你怎么上手, 然后讲我们的回应, 然后是命令.
+
+---
+
 ## 3 行上手
 
 不管你是 bash / Python / Agent 用户, 都是这 3 步.
@@ -18,15 +46,15 @@ rundown 把"一个数据集 + 一个模型 + 一个实验"的 YAML 描述变成�
 
 ```bash
 uv sync                                                       # 建 venv + 装 5 个运行时依赖
-uv run rundown train --dataset etth1 --model lstm --epochs-max 5
-ls artifacts/lstm__etth1__seed0/                              # manifest + weights + curves + predictions
+uv run rundown train --dataset etth1 --model lstm --variant small --epochs-max 5
+ls artifacts/lstm__varsmall__etth1__seed0/                    # manifest + weights + curves + predictions
 ```
 
 **Python** — 读已存 run, 渲成 README-style markdown:
 
 ```python
 from rundown.inspect_run import load_run, render_run_markdown
-print(render_run_markdown(load_run("artifacts/lstm__etth1__seed0")))
+print(render_run_markdown(load_run("artifacts/lstm__varsmall__etth1__seed0")))
 ```
 
 **Agent** — 跨 run 抓指标, 不要写 Python:
@@ -39,11 +67,11 @@ uv run rundown list-runs --format json | jq '[.[] | {id: .run_id, mse: .metrics.
 
 ---
 
-## 设计哲学
+## 我们怎么回应
 
-rundown 不是 MLflow 替代品, 不是 PyTorch 包装, 不是实验追踪器.
-它是一个 **artifact 自描述框架**——一次跑完留下的目录本身, 一年后还能让 reviewer
-完整复算.
+既然问题是「**6 个月后能复算 + 验证 + 对比**, 而不是再发明 ML 算法」,
+我们的回应是让 **artifact 自己描述自己**——一次跑完留下的目录里, 所有事实已经写到
+磁盘, 不依赖 server, 不依赖 schema migration, 不依赖 future-you 的 Onenote.
 
 下面是 3 个承诺 + 3 个拒绝 + 1 个物量约束. 后面所有章节都在印证这些原则.
 
