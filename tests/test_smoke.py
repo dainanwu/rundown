@@ -298,6 +298,128 @@ class TestRegistry:
 
 
 # ---------------------------------------------------------------------------
+# experiments.yaml — optimizer field 下发 (Fix 2: 不再静默丢弃)
+# ---------------------------------------------------------------------------
+class TestExperimentOptimizer:
+    """锁住「experiments.yaml.optimizer → subprocess --lr → engine.lr」这条线.
+
+    早期版本 optimizer 是死字段 — 修了之后:
+      1. load_experiments 必须读 optimizer 块到 Experiment.optimizer
+      2. kind=adam 必须接受; 其它 kind 必须 ValueError (不静默)
+      3. lr 在 (0, 1] 内接受, 否则 ValueError
+      4. run_experiment 拼 subprocess 时, exp.optimizer.lr → --lr
+      5. 不传 optimizer 字段时, Experiment.optimizer is None (trial 走 defaults)
+    """
+
+    def _write_exp_cfg(self, tmp_path: Path, body: str) -> Path:
+        cfg = tmp_path / "configs"
+        cfg.mkdir(exist_ok=True)
+        (cfg / "experiments.yaml").write_text(
+            "experiments:\n  e1:\n    dataset: etth1\n    model: lstm\n"
+            "    epochs_max: 5\n" + body,
+            encoding="utf-8",
+        )
+        return cfg
+
+    def test_load_experiments_optimizes_lr_passes_through(self, tmp_path):
+        from rundown.registry import load_experiments
+        cfg = self._write_exp_cfg(tmp_path, "    optimizer: {kind: adam, lr: 0.0005}\n")
+        exps = load_experiments(cfg)
+        assert exps["e1"].optimizer == {"kind": "adam", "lr": 0.0005}
+
+    def test_load_experiments_rejects_unknown_kind(self, tmp_path):
+        """kind 必须 in SUPPORTED_OPTIMIZERS, 否则硬报错 (不静默)."""
+        from rundown.registry import load_experiments
+        cfg = self._write_exp_cfg(tmp_path, "    optimizer: {kind: sgd, lr: 0.01}\n")
+        with pytest.raises(ValueError, match="optimizer.kind='sgd'"):
+            load_experiments(cfg)
+
+    def test_load_experiments_rejects_lr_out_of_range(self, tmp_path):
+        """lr 越界 (>1 或 <=0) 硬报错 — 防 yaml 里写成小数点漂移."""
+        from rundown.registry import load_experiments
+        cfg = self._write_exp_cfg(tmp_path, "    optimizer: {kind: adam, lr: 5.0}\n")
+        with pytest.raises(ValueError, match=r"optimizer\.lr=5\.0 越界"):
+            load_experiments(cfg)
+        cfg = self._write_exp_cfg(tmp_path, "    optimizer: {kind: adam, lr: 0.0}\n")
+        with pytest.raises(ValueError, match=r"optimizer\.lr=0\.0 越界"):
+            load_experiments(cfg)
+
+    def test_load_experiments_lr_coerced_to_float(self, tmp_path):
+        """yaml 里 lr 写成字符串 ('1e-3') 也强制 float."""
+        from rundown.registry import load_experiments
+        cfg = self._write_exp_cfg(tmp_path, "    optimizer: {kind: adam, lr: '0.0007'}\n")
+        exps = load_experiments(cfg)
+        assert isinstance(exps["e1"].optimizer["lr"], float)
+        assert exps["e1"].optimizer["lr"] == pytest.approx(0.0007)
+
+    def test_load_experiments_optimizer_optional(self, tmp_path):
+        """不写 optimizer → Experiment.optimizer is None, 走 defaults."""
+        from rundown.registry import load_experiments
+        cfg = self._write_exp_cfg(tmp_path, "")
+        exps = load_experiments(cfg)
+        assert exps["e1"].optimizer is None
+
+    def test_run_experiment_passes_lr_to_subprocess(self, tmp_path, monkeypatch):
+        """run_experiment 拼 cmd 时, exp.optimizer.lr 必须出现成 --lr LR."""
+        from rundown.experiment import Experiment
+        captured_cmds = []
+
+        # 拦截 subprocess.run, 不真跑 train, 只记录拼出来的 cmd
+        import rundown.experiment as exp_mod
+
+        def fake_run(cmd, *args, **kwargs):
+            captured_cmds.append(cmd)
+            class _R:
+                returncode = 0
+                stdout = "[run] fake__etth1__seed0\n"
+                stderr = ""
+            return _R()
+
+        monkeypatch.setattr(exp_mod.subprocess, "run", fake_run)
+        # 把 snapshot 掐掉 (不写 _shared/), 简化测试
+        monkeypatch.setattr(exp_mod, "snapshot_code", lambda *a, **k: None)
+
+        exp = Experiment(
+            name="smoke", dataset="etth1", model="lstm", epochs_max=1,
+            variants=["small"],
+            optimizer={"kind": "adam", "lr": 0.0005},
+        )
+        exp_mod.run_experiment(exp, out_root=tmp_path / "artifacts")
+
+        assert len(captured_cmds) == 1, f"expect 1 trial, got {len(captured_cmds)}"
+        cmd = captured_cmds[0]
+        assert "--lr" in cmd, f"--lr 没出现: {cmd}"
+        idx = cmd.index("--lr")
+        assert cmd[idx + 1] == "0.0005"
+
+    def test_run_experiment_no_optimizer_no_lr_flag(self, tmp_path, monkeypatch):
+        """exp.optimizer is None → cmd 不含 --lr (trial 走 defaults)."""
+        from rundown.experiment import Experiment
+        import rundown.experiment as exp_mod
+
+        captured_cmds = []
+
+        def fake_run(cmd, *args, **kwargs):
+            captured_cmds.append(cmd)
+            class _R:
+                returncode = 0
+                stdout = "[run] fake__etth1__seed0\n"
+                stderr = ""
+            return _R()
+
+        monkeypatch.setattr(exp_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(exp_mod, "snapshot_code", lambda *a, **k: None)
+
+        exp = Experiment(
+            name="smoke", dataset="etth1", model="lstm", epochs_max=1,
+            variants=["small"],
+        )
+        exp_mod.run_experiment(exp, out_root=tmp_path / "artifacts")
+
+        assert "--lr" not in captured_cmds[0]
+
+
+# ---------------------------------------------------------------------------
 # artifact round-trip
 # ---------------------------------------------------------------------------
 class TestArtifact:
@@ -581,6 +703,43 @@ class TestCli:
             i for i, k in enumerate(kinds_in_order[:first_epoch_idx]) if k == "step_completed"
         )
         assert last_step_before < first_epoch_idx
+
+    def test_read_run_root_argparse_binding(self, tmp_path):
+        """Fix 3: read-run 必须有 --root, 默认 Path('artifacts'), 与 list/compare/inspect 一致."""
+        from rundown.cli import build_parser
+        parser = build_parser()
+        ns = parser.parse_args(["read-run", "my_run"])
+        from pathlib import Path as _P
+        assert ns.root == _P("artifacts")
+        ns = parser.parse_args(["read-run", "my_run", "--root", str(tmp_path)])
+        assert ns.root == tmp_path
+
+    def test_cli_main_reconfigures_stdout_to_utf8(self, monkeypatch):
+        """Fix 4: cli.py:main() 在解析前 reconfigure stdout/stderr → utf-8.
+
+        Windows 默认 cp936/cp1252, 中文 description / emit() 会乱码.
+        用 MagicMock 让 stdout/stderr 仍能 write, 同时记录 reconfigure 调用.
+        """
+        from unittest.mock import MagicMock
+        import rundown.cli as cli_mod
+
+        # 保存原始流, 测完还原 — 否则 monkeypatch 只在本 test 内有效, 但保险
+        real_stdout, real_stderr = cli_mod.sys.stdout, cli_mod.sys.stderr
+        mock_stdout, mock_stderr = MagicMock(), MagicMock()
+        monkeypatch.setattr(cli_mod.sys, "stdout", mock_stdout)
+        monkeypatch.setattr(cli_mod.sys, "stderr", mock_stderr)
+        try:
+            rc = cli_mod.main(["list-runs", "--root", "."])
+        finally:
+            cli_mod.sys.stdout, cli_mod.sys.stderr = real_stdout, real_stderr
+        # reconfigure 调用次数: stdout 1 + stderr 1 = 2
+        assert mock_stdout.reconfigure.call_count == 1, mock_stdout.reconfigure.mock_calls
+        assert mock_stderr.reconfigure.call_count == 1, mock_stderr.reconfigure.mock_calls
+        for mock in (mock_stdout, mock_stderr):
+            args, kwargs = mock.reconfigure.call_args
+            assert kwargs.get("encoding") == "utf-8"
+            assert kwargs.get("errors") == "replace"
+        assert rc == 0
 
     def test_run_id_format_base_and_variant(self, tmp_path, monkeypatch):
         """CLI run_id 组成契约: ``{model}[__var{variant}]__{dataset}__seed{N}``.

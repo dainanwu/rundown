@@ -76,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     rp = sub.add_parser("read-run", parents=[quiet], help="读一个 run 算新指标")
     rp.add_argument("run_id")
+    rp.add_argument("--root", type=Path, default=Path("artifacts"),
+                    help="artifacts 根目录 (default: ./artifacts); 与 list-runs/compare/inspect 一致")
     rp.add_argument("--metric", default=None,
                     help="要算的指标名; 不传 = 打印 manifest 摘要")
     rp.add_argument("--by", default=None,
@@ -428,7 +430,7 @@ def _cmd_read_run(args: argparse.Namespace) -> int:
     from .artifact import RunArtifact
     from .events import emit
 
-    run_dir = Path("artifacts") / args.run_id
+    run_dir = args.root / args.run_id
     if not (run_dir / "manifest.yaml").exists():
         return _err(f"no manifest at {run_dir}; not a rundown run?")
 
@@ -545,6 +547,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     # (argparse 全局 flag 必须出现在子命令前, 实际使用 `train ... --quiet` 更常见).
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     quiet_flag = "--quiet" in argv_list or "-q" in argv_list
+    # Windows 中文 stdout/stderr 兜底: 默认 codepage 不是 utf-8,
+    # argparse description / emit() 写中文会乱码. 重配成 utf-8 + errors=replace,
+    # 跟 inspect_run.py:560 保持一致. 不存在 reconfigure (老 py3) 时跳过.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            pass
     parser = build_parser()
     args = parser.parse_args(argv)
     # --quiet 影响 emit() stderr 写入; events.jsonl 永远写 (artifact 完整).

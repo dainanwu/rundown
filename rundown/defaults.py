@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 # EngineConfig / GradientStrategy 默认超参
 DEFAULT_STEPS_PER_EPOCH: int = 50
-DEFAULT_EPOCHS_MAX: int = 100
+DEFAULT_EPOCHS_MAX: int = 15
 DEFAULT_LR: float = 1.0e-3
 DEFAULT_BATCH_SIZE: int = 32
 DEFAULT_SEED: int = 0

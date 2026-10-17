@@ -262,6 +262,35 @@ def load_experiments(configs_dir: Path = Path("configs")) -> Dict[str, "Experime
         for required in ("dataset", "model", "epochs_max"):
             if required not in body:
                 raise ValueError(f"experiment {name!r}: {required!r} missing")
+        # 可选 optimizer 块. 跟「拒绝 3: 不擅自替你修配置」一致:
+        #   - 未传        → 走 defaults.DEFAULT_OPTIMIZER (trial 端读)
+        #   - 传 {kind:..} → kind 必须在 SUPPORTED_OPTIMIZERS 里, 否则硬报错
+        #   - 传 {lr:..}   → 仅当 lr ∈ (0, 1] 才接受
+        opt_raw = body.get("optimizer")
+        opt: Optional[Dict[str, Any]] = None
+        if opt_raw is not None:
+            from .experiment import SUPPORTED_OPTIMIZERS  # local import 避循环
+            if not isinstance(opt_raw, dict):
+                raise ValueError(
+                    f"experiment {name!r}: 'optimizer' must be mapping, got {type(opt_raw).__name__}"
+                )
+            kind = opt_raw.get("kind")
+            if kind is not None and kind not in SUPPORTED_OPTIMIZERS:
+                raise ValueError(
+                    f"experiment {name!r}: optimizer.kind={kind!r} not supported "
+                    f"(have: {sorted(SUPPORTED_OPTIMIZERS)}). "
+                    f"落地需改 engine.py; 当前实现只支持 adam, "
+                    f"如需其它调度器请先在 SUPPORTED_OPTIMIZERS 注册."
+                )
+            if "lr" in opt_raw:
+                lr_v = float(opt_raw["lr"])
+                if not (0.0 < lr_v <= 1.0):
+                    raise ValueError(
+                        f"experiment {name!r}: optimizer.lr={lr_v} 越界, 应在 (0, 1]."
+                    )
+                opt_raw = dict(opt_raw)
+                opt_raw["lr"] = lr_v  # 强制 float, 防 yaml 写成 "1e-3" 留字符串
+            opt = opt_raw
         out[name] = Experiment(
             name=name,
             dataset=str(body["dataset"]),
@@ -270,6 +299,7 @@ def load_experiments(configs_dir: Path = Path("configs")) -> Dict[str, "Experime
             variants=list(body.get("variants", []) or []),
             steps_per_epoch=int(body.get("steps_per_epoch", 50)),
             batch_size=(int(body["batch_size"]) if body.get("batch_size") is not None else None),
+            optimizer=opt,
         )
     return out
 

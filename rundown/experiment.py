@@ -13,10 +13,13 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from .defaults import DEFAULT_STEPS_PER_EPOCH
 from ._env import snapshot_code
+
+# engine.py 当前只实现了 adam 调度. 任何其它 kind 都拒绝 (符合"拒绝 3: 不擅自替你修配置").
+SUPPORTED_OPTIMIZERS: frozenset = frozenset({"adam"})
 
 
 @dataclass
@@ -28,6 +31,7 @@ class Experiment:
     variants: List[str] = field(default_factory=list)
     steps_per_epoch: int = DEFAULT_STEPS_PER_EPOCH
     batch_size: Optional[int] = None
+    optimizer: Optional[Dict[str, Any]] = None  # 实验级覆盖; None → defaults
 
     def trial_variants(self) -> List[Optional[str]]:
         """返回每个 trial 用的 variant 名列表.
@@ -63,8 +67,9 @@ def run_experiment(
     run_id, 这样复现 trial 时用同样的 CLI args 就能复用同一产物目录 (run_id 一致).
     """
     trial_variants = exp.trial_variants()
+    lr_repr = f"lr={exp.optimizer['lr']}" if exp.optimizer and "lr" in exp.optimizer else "lr=defaults"
     print(f"[experiment] {exp.name}  trials={len(trial_variants)}")
-    print(f"  dataset={exp.dataset}  model={exp.model}  epochs_max={exp.epochs_max}")
+    print(f"  dataset={exp.dataset}  model={exp.model}  epochs_max={exp.epochs_max}  {lr_repr}")
     print()
 
     # ----- Sweep 共享 snapshot 池: 开头建 1 次, 所有 trial 复用 -----
@@ -99,6 +104,8 @@ def run_experiment(
             cmd += ["--batch-size", str(exp.batch_size)]
         if exp.steps_per_epoch != DEFAULT_STEPS_PER_EPOCH:
             cmd += ["--steps-per-epoch", str(exp.steps_per_epoch)]
+        if exp.optimizer and "lr" in exp.optimizer:
+            cmd += ["--lr", str(exp.optimizer["lr"])]
         if snap_meta_path is not None:
             cmd += ["--snapshot-from-pool", str(snap_meta_path)]
 

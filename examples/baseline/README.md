@@ -7,8 +7,9 @@ time-series benchmark (ETTh1) with a standard neural baseline (2-layer LSTM).
 
 1. How to write a **`BatchProvider`** that conforms to the contract rundown
    expects (see `data.py`).
-2. How to **import `rundown` as a library** and drive training without the
-   CLI (`train.py`).
+2. How to **drive training via the CLI** — `train.py` is a thin wrapper that
+   subprocesses `rundown.cli train` (Phase D). For real projects you don't
+   even need this wrapper; just call the CLI directly.
 3. That the **artifact** is self-describing: `manifest.yaml`, weights,
    curves, events, and predictions all land in one directory.
 
@@ -34,22 +35,22 @@ Task: given 24 hours of lookback, predict 24 hours ahead.
 ## Run it
 
 ```bash
-cd E:\rundown
-python -m examples.baseline.train
+cd /path/to/rundown                       # (Windows: cd E:\rundown)
+python -m examples.baseline.train          # thin wrapper, equivalent to:
+python -m rundown.cli train --dataset etth1 --model lstm
 ```
 
-Expected output (last 4 lines):
+Expected output (final `[done]` line plus summary):
 
 ```
-[result] test MSE   = 5.xxxx
-[result] best val   = 5.xxxx
-[result] epochs     = 5
-[result] run dir    = artifacts\lstm_etth1__ot24h__seed0
+[done] test_mse(test_best)=0.7xxx  ...
 ```
 
-**`test MSE < 8.0`** means the LSTM learned the OT signal — it's about half
-the naive persistence baseline (predict last value, MSE ~15). Anything
-above 8.0 means the example regressed; file an issue.
+Test MSE is in **y-standardized space** (the provider normalizes the OT
+column). A reasonable LSTM with `epochs_max=15` (the rundown default) lands
+in **[0.5, 1.2]** — far below the naive "predict OT mean" baseline of 1.0
+when training kicks in. Anything consistently above 1.2 means the example
+regressed; file an issue.
 
 ## Files
 
@@ -58,17 +59,23 @@ above 8.0 means the example regressed; file an issue.
 | `data/ETTh1.csv` | Bundled benchmark data (17k hourly rows, CC0) |
 | `data.py` | `load_etth1()` + `SlidingWindowProvider` (the BatchProvider contract) |
 | `model.py` | `SequenceLSTM` — 2-layer LSTM, contract-only on `forward(x, warm_start)` |
-| `train.py` | end-to-end script: data → providers → model → manifest → engine → read-back |
+| `train.py` | Thin subprocess wrapper around `rundown.cli train` (for test isolation only) |
 | `test_baseline.py` | pytest that runs `train.py` as a subprocess and asserts loss decreases |
 
 ## Where to read next
 
 If you're wiring `rundown` into a real project, the order to read is:
 
-1. `train.py` — the **only** file that orchestrates everything end-to-end.
-2. `data.py` — the **BatchProvider** contract. Your real loader conforms to it.
-3. `rundown/artifact.py` — the artifact format. The manifest fields you'll
-   populate and the curves / predictions / events you can read back.
+1. **`rundown/cli.py`** — the 8 subcommands. Real usage is the CLI, not a
+   Python script. Override anything with `--epochs-max / --steps-per-epoch
+   / --batch-size / --lr / --kwargs KEY=VAL`.
+2. **`configs/{datasets,models,experiments}.yaml`** — declare your
+   datasets / models / sweeps here. Run `rundown prepare / train /
+   experiment run <name>` against them.
+3. **`rundown/artifact.py`** — the artifact format. The manifest fields
+   you'll read back and the curves / predictions / events on disk.
+4. **`data.py`** in this dir — the **BatchProvider** contract. Your real
+   loader conforms to it.
 
 ## Adapting to your project
 
@@ -79,7 +86,11 @@ The diff to convert this example into your real run is roughly:
   `{"x", "y", "warm_start"}` dict.
 - **`model.py`** → replace `SequenceLSTM` with your model. Keep the
   `forward(x, warm_start) -> [B, T']` contract.
-- **`train.py`** → change `RUN_ID`, `WARM_START`, `ROLLOUT`, `EPOCHS`,
-  `STEPS_PER_EPOCH`, `LR`, `HIDDEN`, `NUM_LAYERS`. Everything else stays.
+- **`configs/datasets.yaml`** → register your dataset (alias, source path,
+  splits, target column).
+- **`configs/models.yaml`** → register your model (factory target with
+  `module.attr` form, default kwargs, optional `variants:` presets).
+- **Tune `rundown train`** args (`--epochs-max / --lr / --variant small`)
+  or write an **`configs/experiments.yaml`** entry to sweep.
 
 That's the entire surface area of `rundown` for a real project.
