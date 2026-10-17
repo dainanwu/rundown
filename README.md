@@ -1,48 +1,179 @@
 # rundown
 
-**面向个人算法开发者 · 你管 run, rundown 管 down**
+**面向个人算法开发者 (无论是否使用 AI 辅助) · 你管 run, rundown 管 down**
 
-rundown 把"一个数据集 + 一个模型 + 一组超参"的 YAML 描述变成一次训练 run,
-以及**自动 down 下来**这次 run 涉及的全部产物——算法 (.py)、实验 (manifest)、
-结果 (weights + curves + predictions)、结论 (你写的事实验证)——管它一辈子.
+rundown 把写在 YAML 里的「数据集 + 模型 + 实验」变成一次训练 run. 跑完时 manifest / weights /
+curves / predictions 自动落到磁盘, 用 manifest 当索引 — 6 个月后直接 `cat manifest.yaml`
+找回, 不依赖 git log, 不依赖未来自己的 Onenote.
 
-你跟 rundown 是 **1:1**. 你不需要 server, 不需要 team, 不需要共享 dashboard.
-你就一个人, 框架也只对你一个人负责.
-
-> "为 Agent 而生"是 rundown 的延伸方向——agent 也是 "个人开发者" 的一种形态.
-> 本仓库覆盖 manual 场景; agent 集成 (auto-commit / session trace) 在 roadmap.
+你跟 rundown 是 **1:1**: 不需要 server, 不需要 team, 不需要共享 dashboard. 框架作为一
+个人都用的 lightweight 工具, 给个人算法开发者用. Agent 集成是顺手兼容, 不是主干.
 
 ---
 
 ## 为什么
 
-你跑 ML 算法/模型实验, 半年后想回看「这个数字是哪次跑出来的」. 这件事 5 个维度都会痛:
+这 5 个痛点每个都对应一个 rundown 子系统, 是每个子系统要解决的反向定义:
 
-1. **历史混淆** — 第 3 次跑 lr 是 0.001 还是 0.0005? 老 commit 改了 num_layers 没有? 你靠
-   git log + 屏幕截图 + Onenote 自答, **明年这些记忆不在**.
+1. **Pain A — 想换 dataset/model 版本时, 训练脚本里写满 raw import, grep 全项目改**
+   → 回应: **Registry** 用 alias 把 yaml 与 import 解耦, 改 yaml 即可换 dataset/model.
 
-2. **可复算压力** — 论文盲审要代码 + 数字, 你从 git 挖目录, 6 个月后你自己认不出哪次跑对应
-   哪个数字. reviewer 看你「流程不严谨」.
+2. **Pain B — 跑完忘了这次 lr / hidden / num_layers 是多少、对应哪个 git commit**
+   → 回应: **Engine** 每次 run 强制 capture `config` + `env.git_commit`, 跑完即落盘.
 
-3. **本地 anchor 散乱** — 三个月一过, 路径 `~/Downloads/exp123_v3/checkpoints/` 跟
-   `~/projects/ml/exp_v3_2024_10/checkpoints/` 是同一回事吗? 你自己都忘了哪个对应论文哪个表格.
+3. **Pain C — 跑 50 次 sweep, 哪个 run 对应 best_val_mse, 不靠 Onenote 找不到**
+   → 回应: **Artifact** 用 manifest.yaml 做索引 (run 同时是数据 + 索引), `list-runs` 一行 SQL 都不要.
 
-4. **agent / 人工协作** — agent 临时改了 `foo.py` 又改回, 你 PR review 时分不清「agent 写的部分」
-   跟「你加的部分」. 见下面「目录布局约定」段 (`## 目录布局约定`) 怎么解.
+4. **Pain D — 6 个月后 cat 自己的 run 目录也读不懂 — manifest 是机器格式, 人需要 projection 才能 grasp**
+   → 回应: **Inspect** 渲出 README-style markdown (purpose / setup / environment / results / how-to-evaluate),
+   你 / reviewer / Agent 拿到 consolidated view 不再拼.
 
-5. **sweep 完找 best** — 跑 50 次 sweep, 哪个 best? 屏幕截图? `grep`? 不可重现的 workflow.
+5. **Pain E — 跑完 30 次, 「method_v2 比 baseline 强 12%」这种主观结论自己记得, reviewer 没法 trace**
+   → 回应: **Fact** 把 manifest 自动写事实, 把主观判断写到 `artifacts/_facts/*.md` 标状态, 走 lifecycle.
 
-这些维度每个都让人感到「浪费时间」— 你应该花在算法上, 不是 archaeology.
+每个子系统的具体机制看下面「rundown 的子系统」段 — 五对五, 一一对应.
 
-**rundown 的作用域很窄**: 解决第 1-5 条 (把 1 次跑 round-trip 化), 不解决 ML 算法本身的难题
-(那是 PyTorch / Optuna 的活). 一次性跑出来的目录, 6 个月后让 reviewer 或 future-you
-完整复算 + 验证 + 对比.
-
-下面告诉你怎么上手, 然后讲我们的回应, 然后是命令.
+下面告诉你 rundown 的设计哲学 (做什么 / 不做什么) + 系统组成 + 怎么上手.
 
 ---
 
-## 3 行上手
+## 设计哲学
+
+`rundown` 的命名已经暗示 framework 的核心 split: **run** 是你做的唯一动作, **down**
+是 framework 自动做的——把这次 run 涉及的产物 (算法 / 实验 / 结果 / 结论) 自动落盘、
+自动建索引、自动跨时间查询. 这一节是这 split 落到 manifesto 上的两层表达: 我们做
+什么, 与我们不做什么.
+
+### 我们做什么
+
+**1 个物量约束 — rundown 是一个轻量化框架.**
+
+```
+torch / numpy / pandas / pyyaml / safetensors    # 5 个运行时依赖, 到此为止
+```
+
+optuna 是 `[extras]` 可选, 不污染核心. **不引** hydra, 不引 pydantic, 不引 click,
+不引 tensorboard, 不引 wandb. 选择理由: 每个被拒的包都尝试替 user 做「更聪明的事」,
+而 smart-default 的代价是把你的工作流吞进去. 拒绝这个诱惑, framework 才能保持 *5 个
+依赖* 级别的轻量.
+
+**3 个承诺 (跟 ## 为什么 段的 5 个 Pain 一一对应)。**
+
+1. **一年后还能复算** (Pain A, B 的工程保障)
+   跑完的瞬间, 复算这件事的所有信息都在 run 目录里. 不依赖 git log, 不依赖外部 DB,
+   不依赖人记. 「表 4 第二行那个数字是哪个 split / 哪个 seed / 哪份代码 / 哪台机器」——
+   拷走目录就能答完.
+
+2. **manifest 是事实本身** (Pain C 的索引机制)
+   `manifest.yaml` 写盘即合同. 跨 run 查询靠 glob manifest 自己, 不建 DB. manifest
+   既是数据, 也是索引. 「拷走即 verify」——这是承诺的物理形态, 不是营销词.
+
+3. **Agent 友好, 人类也好用**
+   两者不冲突时两者都好; 冲突时选 Agent 友好的方案. `--format json` 永远在, 所有动词
+   支持 Python import (`from rundown.cli import main` / `from rundown.inspect_run
+   import load_run`), artifact schema 干净到 Agent 几十行代码能消费完整状态.
+   Agent 集成是兼容层, **不是** 主干 — 主干仍是「个人开发者 + 轻量化框架」.
+
+### 我们不做什么
+
+**2 个拒绝 (framework 的设计选择, 可证).**
+
+1. **不做 UI dashboard**
+   UI 是好看, 不是「复算」. 看板要 server / DB / auth, 必然引入运维依赖, 会破坏
+   "拷走即 verify" 的承诺. 要看板, 把 MLflow 嫁接过来 (5 行 adapter, 在 Phase 2).
+
+2. **不在省空间上动歪脑筋**
+   硬链接 / 共享池 / DVC 那种省空间方案, 看起来省几 MB, 但你拷走产物 / 跨机器复制时
+   它们会偷偷失败. artifact 在边界处就撒了谎. rundown 宁可多存几 MB code snapshot,
+   让边界处永远诚实地自描述.
+
+**anti-scope list (rundown 不是这些)**
+
+> 这个清单跟「2 个拒绝」区别: 拒绝是 *设计选择* (原则上可改), anti-scope 是 *领域边界*
+> (原则上不该做). 你想加这些功能, 请用 MLflow / Optuna / Hydra 等专门工具.
+
+- **不是特征工程框架.** 窗口化、列名、掩码、时间特征——你声明, rundown 不知道.
+- **不是实验追踪器.** 一次 run 一个目录. 要看板, 用 MLflow adapter.
+- **不是调参工具.** Optuna 是 [extras], sweep 模式下走 rundownexperiment run.
+- **不是部署平台.** rundown 产物是 `.safetensors`, 不是 Docker 镜像.
+- **不是深度学习框架.** 没有自动微分魔法, 没有 DSL, 没有构建系统.
+
+它是三样东西: **注册表协议 (Registry) / 训练引擎 (Engine) / 产物格式 (Artifact)**.
+下面那节展开.
+
+---
+
+## rundown 的子系统
+
+5 个 subsystem, 跟 ## 为什么 段 5 个 Pain 1:1 对应. 每个子系统给具体的入口、机制、一句话
+特征.
+
+### Registry — 回应 Pain A (训练脚本 raw import 难解耦)
+
+**痛**: 想换 dataset / model / loss / optimizer 版本时, 训练脚本里写满 raw import
+(`from mymodels.transformer import MyTransformer` 等), grep 全项目改, 容易漏.
+
+**机制**: `configs/{datasets,models,experiments}.yaml` 用 alias 命名 (`dataset: etth1`,
+`model: lstm`), rundown 的 `Registry.load_*()` 用 dotted-path 反射 (`factory.target:
+examples.baseline.model.SequenceLSTM`) 把 alias → 实际类. 改 yaml 就换 dataset/model,
+不动训练脚本.
+
+**入口**: 写一个 `configs/models.yaml` 里加 entry, 改 `factory.target` 指向你的 PyTorch 类.
+
+### Engine — 回应 Pain B (跑完忘了啥超参/哪个 commit)
+
+**痛**: 跑完忘了这次 lr / hidden / num_layers 是多少, 对应哪个 git commit. git log
+不直观 (commit message ≠ run config).
+
+**机制**: `Engine.fit(provider, model, run_dir)` 入口, 训练循环里强制 capture
+`config` (你传的 optimizer / epochs) + `env.git_commit` + `env.git_dirty`, 落盘到
+`run_dir/manifest.yaml`. 配 BPTT / early stop / grad clipping 等训练策略.
+
+**入口**: 调 `rundown.train` 这条 CLI 即可. 训练逻辑封装在 `rundown/engine.py`,
+不替 user 写模型.
+
+### Artifact — 回应 Pain C (sweep 完 best 找不到)
+
+**痛**: 跑 50 次 sweep, 想问「这次 best_val_mse 来自哪个 run」要 `grep` manifest
++ 屏幕截图 + Onenote.
+
+**机制**: 每次 run 落 `manifest.yaml` + `weights.safetensors` + `curves.safetensors`
++ `predictions/test_best.safetensors` + `events.jsonl`. `manifest` 既是数据也是索引,
+跨 run 查询靠 `rundown list-runs --above-metric best_val_mse 2.0` 走文件系统 glob,
+不建 DB.
+
+**入口**: 跑完一次训练产物自动落到 `artifacts/<run_id>/`, `rundown list-runs` / `compare`
+/ `inspect` 都是 read-only.
+
+### Inspect — 回应 Pain D (run 目录人读不懂)
+
+**痛**: 自己 6 个月后 cat 自己的 run 目录 (manifest + safetensors) 也读不懂 —
+manifest 是机器格式, 人脑需要 *projection* 才能 grasp.
+
+**机制**: `rundown inspect <run_id>` 渲出 README-style markdown, 把 manifest +
+curves + predictions + code snapshot 元信息 投影成人脑可读的 7 段: purpose / setup
+/ environment / results / how-to-evaluate / artifacts on disk. 这是 artifact ↔
+人类阅读的 canonical translator, 也是 Agent 第一次接陌生 run 的 entry point.
+
+**入口**: `rundown inspect <run_id>` 输出到 stdout (可 pipe `.md`); 缺 pyyaml /
+safetensors 时降级.
+
+### Fact — 回应 Pain E (主观结论难 trace)
+
+**痛**: 跑完 30 次, 「method_v2 比 baseline 强 12%」这种主观结论自己记得, 写论文 /
+给 reviewer / 半年后的自己 trace 时没法验证.
+
+**机制**: 跟前面 4 个 subsystem 不同——这是 **手动 escape hatch** (framework 不写
+事实). `artifacts/_facts/main_facts.yaml` 索引每条结论, `fact_<id>.md` 一条结论.
+manifest 自动记事实, fact 文件写判断, 4 状态 (`pending / confirmed / refuted /
+superseded`) lifecycle.
+
+**入口**: 直接 `cat artifacts/_facts/main_facts.yaml` 读, `write_file` 写事实卡.
+有 CLI 的化反而违反原则——事实/判断的边界要保持人手覆盖.
+
+---
+
+## 快速入手
 
 不管你是 bash / Python / Agent 用户, 都是这 3 步.
 
@@ -67,153 +198,7 @@ print(render_run_markdown(load_run("artifacts/lstm__varsmall__etth1__seed0")))
 uv run rundown list-runs --format json | jq '[.[] | {id: .run_id, mse: .metrics.best_val_mse}]'
 ```
 
-下面章节都是这三个例子的展开 — 安装细节 / 三件套 schema / 边界表 / 命令参考 / 给 Agent 的消费指南.
-
----
-
-## 我们怎么回应
-
-既然问题是「**6 个月后能复算 + 验证 + 对比**, 而不是再发明 ML 算法」,
-我们的回应是把 **run 与 down 解耦**——
-
-- **run** 是你做的唯一动作: 选 dataset, 选 model, 选超参, 点 `rundown train`.
-- **down** 是 rundown 自动做的: 把这次 run 涉及的所有产物——**算法、实验、结果、结论**——自动写到磁盘, 自动建索引, 自动跨时间查询. 你不用 review.
-
-`rundown` = `run` + `down`. 命名已经暗示这个 split. 框架承诺的是 down 这一面:
-
-**让 artifact 自己描述自己**——一次跑完留下的目录里, 所有事实已经写到磁盘,
-不依赖 server, 不依赖 schema migration, 不依赖 future-you 的 Onenote.
-
-下面是 3 个承诺 + 3 个拒绝 + 1 个物量约束. 后面所有章节都在印证这些原则.
-
-### 3 个承诺
-
-**1. 一年后还能复算.**
-
-跑完的瞬间, 复算这件事的所有信息都在 run 目录里.
-不依赖 git log, 不依赖外部 DB, 不依赖人记.
-"表 4 第二行那个数字是哪个 split / 哪个 seed / 哪份代码 / 哪台机器"——
-拷走目录就能答完.
-
-**2. manifest 是事实本身.**
-
-`manifest.yaml` 写盘即合同. `list-runs` / `compare` / `read-run` 全走文件系统,
-没有 server, 没有 schema migration, 没有「回查」步骤.
-manifest 既是数据, 也是索引.
-
-**3. 让 Agent 用起来舒服, 人类也不难受.**
-
-两者不冲突时两者都好; 冲突时选 Agent 友好的方案.
-`--format json` 永远在, 所有动词支持 Python import,
-artifact schema 干净到 Agent 几十行代码能消费完整状态.
-
-### 3 个拒绝
-
-**1. 不做 UI dashboard.**
-
-UI 是好看, 不是「复算」. 看板需要 server / DB / auth,
-会破坏"拷走就能验证"的承诺.
-要看板, 把 MLflow 嫁接过来 (5 行 adapter).
-
-**2. 不在省空间上动歪脑筋.**
-
-硬链接 / 共享池 / DVC 那种省空间方案, 看起来省了几 MB,
-但你把产物拷走 / 打包 / 跨机器复制时, 它们会偷偷失败,
-artifact 在边界处就撒了谎.
-
-我们宁可多存几 MB code snapshot, 也不让这种事发生.
-
-**3. 不擅自替你修配置.**
-
-配置错了就硬报错, 列出哪里错 + 已经注册的合法值,
-不悄悄给你「智能修复」.
-
-错在 `configs/*.yaml` 注册时, 比错在训练 4 小时后才崩强 10 倍.
-
-### 1 个物量约束
-
-**5 个运行时依赖, 到此为止.**
-
-```
-torch / numpy / pandas / pyyaml / safetensors
-```
-
-optuna 是 `[extras]` 可选, 不污染核心.
-不引 hydra, 不引 pydantic, 不引 click, 不引 tensorboard, 不引 wandb.
-
----
-
-## rundown 不做什么
-
-(具体边界——「rundown 是什么」的反面, 不是哲学. 用来区分
-它和 MLflow / Optuna / PyTorch Lightning 等同类工具的差异.)
-
-- **不是特征工程框架.** 窗口化、列名、掩码、时间特征——你声明, rundown 不知道.
-- **不是实验追踪器.** 一次 run 一个目录. 要看板, 把 MLflow 指过去 (5 行 adapter, Phase 2).
-- **不是调参工具.** Optuna 是 [extras], 不是核心依赖.
-- **不是部署平台.** rundown 的产物是 `.safetensors`, 不是 Docker 镜像.
-- **不是深度学习框架.** 没有自动微分魔法, 没有 DSL, 没有构建系统.
-  它是三样东西: **注册表协议、训练引擎、产物格式**.
-
----
-
-## Fact 系统: 保存结论与判断
-
-跑 30 次 sweep 后, 你真正想问的不是「哪个 run 的 best_val_mse 最小」——
-而是「**我证过什么 / 推翻了什么 / 哪些结论还有效**」.
-
-`manifest.yaml` 记「这次 run 跑了什么」(客观事实).
-Fact 系统记「这次 run **意义**是什么」(主观判断).
-
-### 两层结构
-
-```
-artifacts/_facts/
-├── main_facts.yaml              # 索引: 所有 fact 的标题 + 状态
-├── _main_facts_template.yaml    # 主 fact YAML 模板
-├── _sub_fact_template.md        # 子 fact Markdown 模板
-├── fact_001.md                  # 一条结论: "method_v2 比 baseline 下降 12% MSE"
-├── fact_002.md                  # 另一条结论: "ablation no_attention 失败"
-└── ...
-```
-
-### Fact 状态字段 (生命周期)
-
-| 状态 | 含义 |
-|------|------|
-| `pending` | 待验证 (单次实验, 还没复现) |
-| `confirmed` | 证实 (多次复现 / 多证据支持) |
-| `refuted` | 证伪 (新 run 推翻了先前结论) |
-| `superseded` | 被超越 (结论没错, 被更好方法盖过) |
-
-### 使用流程
-
-```bash
-# 1. 跑完 sweep, agent/人读 main_facts.yaml 看现状
-$ cat artifacts/_facts/main_facts.yaml
-
-# 2. 决定写一条新 fact (或更新老的)
-$ cp artifacts/_facts/_sub_fact_template.md artifacts/_facts/fact_xxx.md
-$ $EDITOR artifacts/_facts/fact_xxx.md
-  # 填: 实验时间 / 设置 / 相关 run 链接 / 结论 / 证据 artifacts
-
-# 3. 把 entry 加进 main_facts.yaml (id / title / status / path)
-```
-
-### 哲学边界
-
-- **手动保存** — framework 不自动捕获「这次实验意义」, 那是 user/agent 自己决定的
-- **无 CLI** — fact 是文本文件, agent/人用 `read_file` / `write_file` 直接读写
-- **无 schema 校验** — 内容由 user/agent 自我负责 (跟 manifest 冻结契约对比: manifest 是事实, fact 是判断, 判断需要弹性)
-
-### 为什么跟 rundown 哲学一致
-
-| 哲学 | fact 系统 |
-|------|----------|
-| 承诺 1: 一年后还能复算 | fact 是「结论」的产物, 跟 predictions 同级 |
-| 承诺 2: manifest 是事实本身 | fact 文件写在 out_root/_facts/, 跟 manifest 同地位 |
-| 承诺 3: 让 Agent 用起来舒服 | Agent 能直接 read_file / write_file, 无 CLI 中介 |
-| 拒绝 3: 不擅自替你修 | 不自动捕获「这次实验意义」——那是 user/agent 决策 |
+下面章节是 modules 具体怎么用 (三件套配置 + 8 个动词 + 目录布局 + artifact 例子).
 
 ---
 
@@ -776,6 +761,43 @@ test MSE ≈ 1.10 (标准化空间), **对齐 ETT 论文 baseline**.
 - 你的项目有强 MLOps 需求 (A/B 部署、流量切分、监控告警) → 用 MLflow / Ray
 - 你的数据是图片/文本, 没有时序结构 → rundown 的窗口化对你没有意义
 - 你的项目已经定型, 跑 5 年不会改 → 别折腾, 现状能跑就行
+
+---
+
+## 附录
+
+这一段是 reference 性质的内容. **约束、规则、模板、命名规范、forbidden imports 都
+不在这里重复** — 它们在 `AGENTS.md` (项目给 AI Agent 看的约束文档). 本附录只
+放 README 涉及的指向与概览.
+
+### Pointer 列表
+
+| 内容 | 位置 |
+|------|------|
+| Module 边界 / 谁能 import 什么 | `AGENTS.md` §1 |
+| Anti-patterns (不要做的 8 件事) | `AGENTS.md` §2 |
+| 命名规范 (dataset_alias / model_id / run_id 正则) | `AGENTS.md` §3 |
+| 测试要求 / 跑通门槛 | `AGENTS.md` §4 |
+| Forbidden imports (lint rule, pickle / torch.save / matplotlib / seaborn / plotly) | `AGENTS.md` §5 |
+| `rundown.ids.assert_valid` (写入前校验) | `rundown/ids.py` |
+| Adapter 模式 (MLflow / WandB 等怎么接 rundown) | `examples/baseline/README.md` (「Adapting to your project」段) |
+| inspect 输出 schema | `rundown/inspect_run.py` (RunIntel dataclass) |
+| Manifest schema | `rundown/artifact.py` + `examples/` 的实际 manifest 输出 |
+
+### 一些「不用进 README」的隐性规则
+
+- **run_id 格式**: `^[a-z][a-z0-9_]+__[a-z][a-z0-9_]+__seed\d+$` — 详见 `AGENTS.md` §3
+  及 `rundown.ids.assert_valid`.
+- **directory convention** (lifecycle 维度): 详见前面「目录布局约定」段, 本附录不重复.
+- **.gitignore 推荐块**: 详见「目录布局约定」段内嵌块.
+
+### 给读者的 meta 建议
+
+README + AGENTS.md 应该一起读, 但顺序很重要:
+
+1. **本文档** — 先 grasp 设计哲学 + 5 个 subsystem + 怎么上手. 给「做什么」/「不做什么」/「机制对应痛点」的 narrative 答案.
+2. **`AGENTS.md`** — 当你要 *写* 代码进来 (新 model / 新 dataset / PR), 读这个. 给你 lint/rule/anti-pattern 的硬约束.
+3. **`examples/baseline/`** — 当你 *adapt* rundown 到自己项目时, 这是 source-of-truth: 改 `data.py` + `model.py` + `train.py` 三处.
 
 ---
 
