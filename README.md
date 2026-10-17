@@ -10,6 +10,35 @@ rundown 把"一个数据集 + 一个模型 + 一个实验"的 YAML 描述变成�
 
 ---
 
+## 3 行上手
+
+不管你是 bash / Python / Agent 用户, 都是这 3 步.
+
+**bash** — 跑一次训练并拿到产物:
+
+```bash
+uv sync                                                       # 建 venv + 装 5 个运行时依赖
+uv run rundown train --dataset etth1 --model lstm --epochs-max 5
+ls artifacts/lstm__etth1__seed0/                              # manifest + weights + curves + predictions
+```
+
+**Python** — 读已存 run, 渲成 README-style markdown:
+
+```python
+from rundown.inspect_run import load_run, render_run_markdown
+print(render_run_markdown(load_run("artifacts/lstm__etth1__seed0")))
+```
+
+**Agent** — 跨 run 抓指标, 不要写 Python:
+
+```bash
+uv run rundown list-runs --format json | jq '[.[] | {id: .run_id, mse: .metrics.best_val_mse}]'
+```
+
+下面章节都是这三个例子的展开 — 安装细节 / 三件套 schema / 边界表 / 命令参考 / 给 Agent 的消费指南.
+
+---
+
 ## 设计哲学
 
 rundown 不是 MLflow 替代品, 不是 PyTorch 包装, 不是实验追踪器.
@@ -182,16 +211,16 @@ uv run rundown train --dataset etth1 --model lstm --epochs-max 5    # 覆盖默�
 输出:
 
 ```
-[run] lstm__etth1__seed0
+[run] lstm__varsmall__etth1__seed0
   dataset : etth1  (source=csv, path=examples/baseline/data/ETTh1.csv)
   target  : OT
-  model   : lstm  (51,777 params, {'in_dim': 6, 'hidden': 64, 'num_layers': 2})
-  config  : epochs=15 steps_per_epoch=50 batch_size=32 lr=0.001
-  run dir : artifacts\lstm__etth1__seed0
-[done] lstm__etth1__seed0  epochs=15  best_val_mse=2.27  test_mse(test_best)=1.20  duration=4.0s
+  model   : lstm  variant=small  (5,153 params, {'in_dim': 6, 'hidden': 32, 'num_layers': 1})
+  config  : epochs=5 steps_per_epoch=50 batch_size=32 lr=0.001
+  run dir : artifacts\lstm__varsmall__etth1__seed0
+[done] lstm__varsmall__etth1__seed0  epochs=5  best_val_mse=2.7334  test_mse(test_best)=1.16  duration=2.6s
 ```
 
-跑完去 `artifacts/lstm__etth1__seed0/` 看产物——7 个文件 + 1 个 code 快照,
+跑完去 `artifacts/lstm__varsmall__etth1__seed0/` 看产物——7 个文件 + 共享的 `_shared/` code 快照,
 manifest 一眼看穿所有配置.
 
 ---
@@ -248,8 +277,6 @@ experiments:
     optimizer: {kind: adam, lr: 0.001}    # 可选, 不写走 defaults.DEFAULT_OPTIMIZER
     variants: [small, large, deep]        # 引用 models.lstm.variants 的 key
 ```
-
-跑 sweep:
 
 跑 sweep:
 
@@ -316,7 +343,7 @@ Sweep 自己不再预拼 run_id prefix；trial run_id 与单次 `rundown train` 
 
 ---
 
-## 七个动词
+## 八个动词
 
 ```bash
 rundown prepare --dataset <alias>              # 加载数据集, 算 content hash, 注册
@@ -325,10 +352,30 @@ rundown experiment run <name>                  # 跑注册过的 sweep (笛卡�
 rundown read-run <run_id> [--metric X]         # 读已有 run, 算新指标
 rundown list-runs [filters]                    # 列出 artifacts/*/manifest.yaml
 rundown compare <run_a> <run_b>                # 两个 run 的 manifest diff
+rundown inspect <run_id|--all [--since-days N]] # 读 run, 输出 README-style markdown
 rundown analyze --analyzer X <run_id>          # Phase 2 stub
 ```
 
 每个动词同时支持 CLI / Python (`from rundown.cli import main`) / Agent 调用.
+
+### 给 Agent 消费者 (consume contract)
+
+**Do**:
+
+- `--format json` 永远在 (list-runs 是最先实现的, 后续 verb 会陆续加); 不解析 stderr 进度行.
+- `artifacts/<run_id>/manifest.yaml` 是单点真值 — 不要尝试从 events.jsonl 推断 run 状态 (events 是事件流, 不是 schema).
+- `rundown inspect <run_id> -q` 拉一份 README-style markdown — 含 purpose/setup/environment/results/curves/predictions/events/how-to-evaluate/artifacts 8 段, 可喂给 LLM.
+- Python 入口: `from rundown.cli import main(argv)` / `from rundown.inspect_run import load_run, render_run_markdown`. standalone, 不需要 train / engine.
+- Run 排序用 manifest.created_at, 用 `--since-days N` 切时间窗 (UTC).
+
+**Don't**:
+
+- 不要 hardcode `run_id` 格式去解析 (例如 `lstm__varsmall__etth1__seed0`); 从 manifest.run_id 字段读.
+- 不要假定产出物路径不变; 唯一可靠入口是 `manifest.config` 里 `out_dir` / `_shared/code_<sha>/` 引用.
+- 不要解析 stderr 上的进度行 — 那些 stderr 是给人看的, 会被 `--quiet` 压掉.
+- 不要 split `events.jsonl` 行用空格 — 用 `line.split("  ", 2)` (agent 友好格式里间是双空格).
+
+**When CLI is unavailable** (例如 submodule 调用, 无 system python): Python 入口仍然工作; `from rundown.inspect_run import load_run` 不依赖 cli 解析.
 
 ### 全局 `--quiet` / `-q`
 
@@ -478,8 +525,10 @@ uv run rundown train --dataset etth1 --model lstm --variant small --seed 0 \
 ```
 artifacts/
 ├── _shared/                              # sweep / 多次 train 同代码共享的 snapshot 池
-│   ├── code_<sha8>.zip                   # 物理 1 份, 597KB 量级
-│   └── code_<sha8>.zip.meta.json         # sweep 模式 subprocess 读这个拿完整 info
+│   ├── code_<sha8>/                      # git repo 项目: `git archive` 输出 tar 目录 (preferred)
+│   │   └── .meta.json                    # sha256 / size_bytes / num_files
+│   ├── code_<sha8>.zip                   # 非 git repo 项目: zip 全目录 (excludes artifacts/.venv/__pycache__)
+│   └── code_<sha8>.zip.meta.json         # .zip 模式的 metadata sidecar
 └── <run_id>/                             # 每次 run 一个目录
     ├── manifest.yaml
     ├── weights.safetensors
@@ -489,10 +538,10 @@ artifacts/
     ├── predictions/
     │   ├── test.safetensors
     │   └── test_best.safetensors
-    └── (无 code_*.zip — 引用 ../_shared/code_<sha8>.zip)
+    └── (run_dir 内无 code_* — 引用 ../_shared/code_<sha8>)
 ```
 
-**默认行为**: `rundown train --out-dir artifacts` 跑完一次后, snapshot 落在 `artifacts/_shared/code_xxx.zip`, run_dir 内**没有**自己的 code_*.zip. 多次 train 同代码 → 自动跳过写, 物理 1 份.
+**默认行为**: `rundown train --out-dir artifacts` 跑完一次后, snapshot 落在 `artifacts/_shared/code_xxx/` 或 `code_xxx.zip` (取决于是否 git repo), run_dir 内**没有**自己的 code 副本. 多次 train 同代码 → 自动跳过写, 物理 1 份.
 
 **`--run-dir` 模式**: snapshot 直接落 run_dir 内 (单 run 自给自足, 不参与 `_shared/` 池).
 
@@ -563,7 +612,7 @@ env:
 ```
 rundown/
 ├── __init__.py
-├── cli.py              # 7 个动词: prepare / train / experiment / read-run / list-runs / compare / analyze
+├── cli.py              # 8 个动词: prepare / train / experiment / read-run / list-runs / compare / inspect / analyze
 ├── registry.py         # YAML 加载 + 反射绑定 + alias 校验 (datasets / models / experiments)
 ├── engine.py           # GradientStrategy.fit() + per-step events + 自动记录 env
 ├── artifact.py         # 写/读 manifest + weights + curves + predictions
@@ -572,9 +621,10 @@ rundown/
 ├── ids.py              # alias / run_id 正则校验
 ├── cli_query.py        # list_runs / compare_runs (glob manifest.yaml 直接读)
 ├── experiment.py       # sweep: 笛卡尔积 (subprocess 调 train)
-├── defaults.py         # DEFAULT_BATCH_SIZE / DEFAULT_LR 等单点真值
+├── defaults.py         # DEFAULT_BATCH_SIZE / DEFAULT_LR / DEFAULT_OPTIMIZER 等单点真值
+├── inspect_run.py      # rundown inspect: read-only run → README-style markdown
 ├── facts/              # fact 系统: main_facts.yaml 索引 + 子 fact .md
-└── (11 个 package 文件 / 子包, ~1900 行)
+└── (12 个 package 文件 / 子包, ~2600 行)
 
 configs/
 ├── datasets.yaml
@@ -591,11 +641,11 @@ examples/
     ├── model.py
     ├── train.py        # thin wrapper: subprocess 调 rundown.cli train
     └── test_baseline.py
-tests/                  # pytest, 65 个测试
+tests/                  # pytest, 90 个测试
 ├── fixtures.py         # ToyNet + RandomProvider
-├── test_smoke.py       # 47 测试: 核心流程 / cli / registry / artifact / snapshot
-└── test_facts.py       # 15 测试: facts 系统路径 / 模板 / 哲学边界
-                       # (+ 3 测试: events stderr JSON 格式 + --quiet)
+├── test_smoke.py       # 60 测试: 核心流程 / cli / registry / artifact / snapshot / events
+├── test_facts.py       # 15 测试: facts 系统路径 / 模板 / 哲学边界
+└── test_inspect_run.py # 15 测试: load_run / render / since_days / CLI
 AGENTS.md               # 给 AI Agent 看的约束文档
 pyproject.toml          # PEP 621 metadata + [optuna] extras
 uv.lock                 # 锁定的依赖版本 (commit 进 git)
@@ -625,4 +675,16 @@ test MSE ≈ 1.10 (标准化空间), **对齐 ETT 论文 baseline**.
 
 ## License
 
-MIT.
+MIT License. Copyright © 2026 Dynan Wu & rundown contributors.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
