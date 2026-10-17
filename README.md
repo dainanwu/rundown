@@ -520,6 +520,58 @@ uv run rundown train --dataset etth1 --model lstm --variant small --seed 0 \
 
 ---
 
+## 目录布局约定
+
+跑 ML 实验的项目根目录有 3 类互不重叠的子目录. 区分维度是 **生命周期** (durable vs ephemeral), 不是 **作者** (agent vs human):
+
+| 区域 | 生命周期 | git | 角色 |
+|------|----------|-----|------|
+| `src/` `tests/` `configs/` | durable | **tracked** | 项目代码 — 进 commit / 论文 / release |
+| `artifacts/` | durable (量大) | **ignored** | rundown 跑出来的产物 — manifest + weights + curves + predictions |
+| `.scratch/` | ephemeral | **ignored** | 过程工具代码 — agent session 临时产物 / human debug 脚本 / 实验探针 |
+
+> Agent 与 human **都可以** 写 `src/`, 也都可以写 `.scratch/`. 是否进产品是 lifecycle 决定, 不是作者决定.
+
+### `.scratch/` 怎么用
+
+子目录名 = agent session id 一对一, 避免多 session 互踩:
+
+```
+.scratch/
+├── agent_cursor_abc123/    # Cursor session abc123 的临时脚本
+├── agent_cline_xyz789/     # Cline session xyz789 的探索代码
+├── debug_2024_10_17/       # 人类 debug 一日的临时 queries
+└── probe_lr_sweep/         # 实验性 lr sweep 探针, 留不留看心情
+```
+
+**enforcement 谁负责**: agent framework 自己. Cursor / Cline / Devin 都有 session work-dir 配置, 把 session 临时文件指向 `.scratch/<session_id>/`. rundown **不读不写** 这个目录, manifest 也不捕获 — 这是 integration contract, 不是 framework invariant.
+
+### `.gitignore` 推荐
+
+```gitignore
+# rundown 产物
+artifacts/
+
+# 过程代码 (agent 临时 / human debug)
+.scratch/
+
+# 通用
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+```
+
+拷走项目代码 (`git clone`) → 默认不会拷 `.scratch/`, 也不会拷 `artifacts/`. 这是「拷走即 verify」的物理保障: durable artifacts 在 commit 里, ephemeral 留本地.
+
+### 跟 rundown 哲学的关系
+
+- **承诺 2 (拷走即 verify)** — `.scratch/` 默认不拷走, durable/ephemeral 自动分离, 不用 framework 强制.
+- **拒绝 3 (不擅自替你修)** — agent session id 是 agent framework 自己声明的, 不由 rundown 强加. rundown 不假设 "session id 在 manifest 里", 因为 session boundary 是 agent framework 的语义, rundown 不抢.
+- **1 个物量约束** — directory convention 是 zero-engineering 解. 不引新机制, 不加 manifest 字段. 复用现有 `artifacts/` 已有的 gitignore pattern, 自然推广.
+
+---
+
 ## run 跑完后的目录
 
 ```
