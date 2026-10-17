@@ -1,12 +1,16 @@
 # rundown
 
-**声明式运行 · 持久产物 · 为 Agent 而生**
+**面向个人算法开发者 · 你管 run, rundown 管 down**
 
-rundown 把"一个数据集 + 一个模型 + 一个实验"的 YAML 描述变成一次训练运行,
-以及一个明年还能完整读懂的目录. 一次 `rundown train` 命令搞定 dataset / model / 超参 / checkpoint 全套.
+rundown 把"一个数据集 + 一个模型 + 一组超参"的 YAML 描述变成一次训练 run,
+以及**自动 down 下来**这次 run 涉及的全部产物——算法 (.py)、实验 (manifest)、
+结果 (weights + curves + predictions)、结论 (你写的事实验证)——管它一辈子.
 
-> "为 Agent 而生"是长期承诺. 本仓库实现的是前两条.
-> 完整 Agent 工具集在 Phase 2.
+你跟 rundown 是 **1:1**. 你不需要 server, 不需要 team, 不需要共享 dashboard.
+你就一个人, 框架也只对你一个人负责.
+
+> "为 Agent 而生"是 rundown 的延伸方向——agent 也是 "个人开发者" 的一种形态.
+> 本仓库覆盖 manual 场景; agent 集成 (auto-commit / session trace) 在 roadmap.
 
 ---
 
@@ -70,8 +74,15 @@ uv run rundown list-runs --format json | jq '[.[] | {id: .run_id, mse: .metrics.
 ## 我们怎么回应
 
 既然问题是「**6 个月后能复算 + 验证 + 对比**, 而不是再发明 ML 算法」,
-我们的回应是让 **artifact 自己描述自己**——一次跑完留下的目录里, 所有事实已经写到
-磁盘, 不依赖 server, 不依赖 schema migration, 不依赖 future-you 的 Onenote.
+我们的回应是把 **run 与 down 解耦**——
+
+- **run** 是你做的唯一动作: 选 dataset, 选 model, 选超参, 点 `rundown train`.
+- **down** 是 rundown 自动做的: 把这次 run 涉及的所有产物——**算法、实验、结果、结论**——自动写到磁盘, 自动建索引, 自动跨时间查询. 你不用 review.
+
+`rundown` = `run` + `down`. 命名已经暗示这个 split. 框架承诺的是 down 这一面:
+
+**让 artifact 自己描述自己**——一次跑完留下的目录里, 所有事实已经写到磁盘,
+不依赖 server, 不依赖 schema migration, 不依赖 future-you 的 Onenote.
 
 下面是 3 个承诺 + 3 个拒绝 + 1 个物量约束. 后面所有章节都在印证这些原则.
 
@@ -550,15 +561,30 @@ uv run rundown train --dataset etth1 --model lstm --variant small --seed 0 \
 
 ## 目录布局约定
 
-跑 ML 实验的项目根目录有 3 类互不重叠的子目录. 区分维度是 **生命周期** (durable vs ephemeral), 不是 **作者** (agent vs human):
+跑 ML 实验的项目根目录有 4 类互不重叠的子目录. 区分维度是 **生命周期** (durable vs ephemeral), 不是 **作者** (agent vs human):
 
 | 区域 | 生命周期 | git | 角色 |
 |------|----------|-----|------|
 | `src/` `tests/` `configs/` | durable | **tracked** | 项目代码 — 进 commit / 论文 / release |
+| `examples/<name>/`      | durable | **tracked** | 参考 showcase — 1 套最小可跑的 model + data + train (`examples/baseline/` 默认存在). 你写的真实代码可不放这里 |
 | `artifacts/` | durable (量大) | **ignored** | rundown 跑出来的产物 — manifest + weights + curves + predictions |
 | `.scratch/` | ephemeral | **ignored** | 过程工具代码 — agent session 临时产物 / human debug 脚本 / 实验探针 |
 
 > Agent 与 human **都可以** 写 `src/`, 也都可以写 `.scratch/`. 是否进产品是 lifecycle 决定, 不是作者决定.
+
+### `examples/<name>/` 怎么用
+
+它是 **rundown 自带的参考 showcase** — 1 套最小可跑的 model + data + train.
+跑 `python -m examples.baseline.train` 就能源码级看完 rundown 的 end-to-end 流程.
+
+你**真实项目**的模型 / 数据 loader 不必放这里. `configs/models.yaml` 里写的是
+dotted path (`examples.baseline.model.SequenceLSTM`), 你写 `mymodels.transformer.MyTformer`
+也 work. `examples/` 是 **showcase 锚点, 不是 framework 强制的家**.
+
+adapt guide 在 `examples/baseline/README.md` 里:「把 `data.py` / `model.py` 换成你的,
+`train.py` 改 RUN_ID / WARM_START 等常量」。
+
+
 
 ### `.scratch/` 怎么用
 
