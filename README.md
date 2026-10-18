@@ -2,18 +2,19 @@
 
 **面向个人算法开发者（无论是否使用 AI 辅助）· 你负责 run，rundown 负责 down**
 
-rundown 把写在 YAML 里的「数据集 + 模型 + 实验」变成一次训练运行。跑完时，manifest / weights /
-curves / predictions 自动落到磁盘，用 manifest 当索引 —— 6 个月后直接 `cat manifest.yaml`
+rundown 是一套四层架构 —— **记录（artifact / session）、执行（trainers）、编排（experiment）、CLI 适配**。
+YAML 里的「数据集 + 模型 + 实验」（以及可选的 trainer）经 CLI 触发，依次穿过四层完成一次训练运行。跑完时 manifest / weights /
+curves / predictions 自动落盘，用 manifest 当索引 —— 无论何时直接 `cat manifest.yaml`
 就能找回，不依赖 git log，也不依赖未来自己的笔记。
 
-你和 rundown 是**一对一**的关系：不需要服务器、不需要团队、不需要共享看板。框架定位为一个
-人就能用的轻量工具，服务个人算法开发者。Agent 集成只是顺手兼容，不是主干。
+你和 rundown 是**一对一**的关系：不需要服务器、不需要团队、不需要状态面板。框架定位为一个
+人就能用的轻量工具，服务个人算法开发者，并对 Agent 开发友好。
 
 ---
 
-## 为什么
+## Rundown 对应的问题
 
-这 5 个痛点各自对应一个 rundown 子系统，是每个子系统要解决的反向定义：
+rundown 的子系统对应着个人研究开发过程中的不同痛点问题：
 
 1. **痛点 A —— 想换数据集 / 模型版本时，训练脚本里写满了硬编码 import，只能全项目搜改**
    → 回应：**Registry（注册表）**用别名（alias）把 YAML 与 import 解耦，改 YAML 即可换数据集 / 模型。
@@ -33,9 +34,12 @@ curves / predictions 自动落到磁盘，用 manifest 当索引 —— 6 个月
    并标记状态，走完整的生命周期。`manifest.yaml` 仍是自动写的事实记录（机器可读），
    fact 文件写的是人脑下的判断，两层互不替代。
 
-每个子系统的具体机制见下面「rundown 的子系统」一节 —— 五对五，一一对应。
+6. **痛点 F —— 多模型 / 自定义 loss / 分阶段 / 联合训练时，CLI 只能跑固定训练循环，写不到需求里**
+   → 回应：**Trainer（训练范式）**把训练循环抽成可插拔协议 —— `Trainer` 协议 + `RunSession`
+   生命周期 + 别名注册表。多模型 / 自定义 loss / 分阶段都走 `examples/custom_trainers/` 模板，
+   不动 `engine.py`。
 
-下面介绍 rundown 的设计哲学（做什么 / 不做什么）、系统组成，以及怎么上手。
+每个子系统的具体机制见下面「rundown 的子系统」一节。
 
 ---
 
@@ -54,31 +58,26 @@ curves / predictions 自动落到磁盘，用 manifest 当索引 —— 6 个月
 torch / numpy / pandas / pyyaml / safetensors    # 5 个运行时依赖, 到此为止
 ```
 
-optuna 是 `[extras]` 可选, 不污染核心. **不引入** Hydra、pydantic、click、
-tensorboard、wandb。选择理由：每个被拒绝的包都在试图替使用者做「更聪明的事」，
-而智能默认值的代价是把你的工作流整个吞进去。拒绝这个诱惑，框架才能保持 *5 个
-依赖* 级别的轻量。
+**3 个承诺。**
 
-**3 个承诺（与「为什么」一节的 5 个痛点一一对应）。**
-
-1. **一年后还能复算**（痛点 A、B 的工程保障）
+1. **一年后还能复算**
    跑完的瞬间，复算所需的所有信息都在运行目录里。不依赖 git log、不依赖外部数据库、
    不依赖人记。「表 4 第二行那个数字来自哪个数据划分 / 哪个随机种子 / 哪份代码 / 哪台机器」——
    拷走目录就能全部回答。
 
-2. **manifest 是事实本身**（痛点 C 的索引机制）
+2. **manifest 是事实本身**
    `manifest.yaml` 写盘即合同。跨运行查询靠 glob manifest 自己，不建数据库。manifest
    既是数据，也是索引。「拷走即可验证」——这是承诺的物理形态，不是营销措辞。
 
-3. **Agent 友好，人类也好用**
-   两者不冲突时都好；冲突时选 Agent 友好的方案。`--format json` 永远可用，所有动词
+3. **人类好用，Agent 也友好**
+   两者不冲突时都好；冲突时选 Agent 友好的方案。查询类动词优先保证 `--format json`（当前 `list-runs` 已实现）；所有动词
    都支持 Python 调用（`from rundown.cli import main` / `from rundown.inspect_run
    import load_run`），产物结构干净到 Agent 几十行代码就能消费完整状态。
    Agent 集成是兼容层，**不是**主干 —— 主干仍是「个人开发者 + 轻量化框架」。
 
 ### 我们不做什么
 
-**2 个拒绝（框架的设计选择，可验证）。**
+**2 个拒绝。**
 
 1. **不做 UI 看板**
    看板好看，但不是「复算」。看板需要服务器 / 数据库 / 鉴权，必然引入运维依赖，会破坏
@@ -89,25 +88,14 @@ tensorboard、wandb。选择理由：每个被拒绝的包都在试图替使用�
    它们会悄悄失败。产物在边界处就撒了谎。rundown 宁可多存几 MB 代码快照，
    让边界处永远诚实地自描述。
 
-**边界清单（rundown 不是这些）**
-
-> 这份清单与「2 个拒绝」的区别：拒绝是 *设计选择*（原则上可改），边界清单是 *领域边界*
-> （原则上不该做）。想加这些功能，请用 MLflow / Optuna / Hydra 等专门工具。
-
-- **不是特征工程框架。** 窗口化、列名、掩码、时间特征——这些由你声明，rundown 不感知。
-- **不是实验追踪器。** 一次运行一个目录。要看板，用 MLflow 适配器。
-- **不是调参工具。** Optuna 是 [extras]（当前未接线，预留给 Phase 2）; `rundown experiment run` 目前只跑 cartesian 笛卡尔积扫描。
-- **不是部署平台。** rundown 的产物是 `.safetensors`，不是 Docker 镜像。
-- **不是深度学习框架。** 没有自动微分的魔法，没有 DSL，没有构建系统。
-
-它是三样东西：**注册表协议（Registry）/ 训练引擎（Engine）/ 产物格式（Artifact）**。
-下面那节展开。
+它按四层划分 —— **记录（artifact / session）、执行（trainers）、编排（experiment）、CLI 适配**。
+下面那节展开 6 个跨层子系统（每个对应一个痛点）。
 
 ---
 
 ## rundown 的子系统
 
-5 个子系统, 与「为什么」一节 5 个痛点一一对应. 每个子系统给出具体入口、机制和一句话
+6 个子系统, 与「Rundown 对应的问题」一节 6 个痛点一一对应. 每个子系统给出具体入口、机制和一句话
 特征.
 
 ### Registry —— 回应痛点 A (训练脚本硬编码 import 难解耦)
@@ -127,12 +115,29 @@ examples.baseline.model.SequenceLSTM`) 把别名映射到实际类. 改 YAML 就
 **痛**: 跑完忘了这次的学习率 / 隐藏层 / 层数是多少, 对应哪个 git 提交. git log
 不直观 (提交信息 ≠ 运行配置).
 
-**机制**: `Engine.fit(provider, model, run_dir)` 入口, 训练循环里强制记录
-`config` (你传入的 optimizer / epochs) + `env.git_commit` + `env.git_dirty`, 落盘到
-`run_dir/manifest.yaml`. 配 BPTT / early stop / grad clipping 等训练策略.
+**机制**: `engine.py` 现在是 `GradientStrategy` —— 内置 `gradient` trainer 的实现.
+一次 run 的生命周期 (`run_started` / 训练中事件 / `run_completed` / `run_failed`)
+由 `RunSession` 统一收口, 写初始 manifest + 捕获 env + 写最终 manifest. 训练循环里
+强制记录 `config` (你传入的 optimizer / epochs) + `env.git_commit` + `env.git_dirty`.
 
-**入口**: 调 `rundown.train` 这条 CLI 即可. 训练逻辑封装在 `rundown/engine.py`,
-不替使用者写模型.
+**入口**: 调 `rundown train` 这条 CLI 即可. 训练逻辑封装在 `rundown/engine.py` +
+`rundown/session.py`, 不替使用者写模型. 自定义范式走 Trainer (见下).
+
+### Trainer —— 回应痛点 F (CLI 只能跑固定训练循环)
+
+**痛**: 想跑自定义 loss (Huber + L1)、分阶段训练 (freeze backbone 后训 head)、联合训练
+(主模型 + 辅助模型 / 蒸馏), 内置 `gradient` 写不到; 改 `engine.py` 又会污染核心.
+
+**机制**: `rundown.trainers.Trainer` 是结构子类型协议 —— 满足 `name` / `required_provider_keys` /
+`primary_metric` / `validate` / `fit` 即可被注册表接受. `GradientTrainer` (内置 `gradient`)
+是 `GradientStrategy` 的薄适配器, 保留默认行为; 自定义 trainer 写
+`examples/custom_trainers/` 风格的 `trainer.py` + 可选 `trainer_config.yaml`. 训练产物一律
+走 `RunSession` (manifest / weights / curves / predictions / events), trainer 不直接
+碰 artifact 落盘. 注册可选 —— `configs/trainers.yaml` 写 alias, 或 CLI 直接传 dotted path.
+
+**入口**: `--trainer <alias-or-dotted-path>` + `--trainer-config <json-or-yaml>`; sweep
+走 `experiments.yaml.trainer` / `trainer_config` / `metric`. 详见下面的「自定义 trainer」一节
+与 [`examples/custom_trainers/README.md`](examples/custom_trainers/README.md).
 
 ### Artifact —— 回应痛点 C (扫描完找不到最佳)
 
@@ -200,7 +205,7 @@ print(render_run_markdown(load_run("artifacts/lstm__varsmall__etth1__seed0")))
 uv run rundown list-runs --format json | jq '[.[] | {id: .run_id, mse: .metrics.best_val_mse}]'
 ```
 
-下面章节是各模块具体怎么用 (三件套配置 + 8 个动词 + 目录布局 + 产物例子).
+下面章节是各模块具体怎么用 (四件套配置 + 8 个动词 + 目录布局 + 产物例子).
 
 ---
 
@@ -251,9 +256,9 @@ manifest 一眼看穿所有配置.
 
 ---
 
-## 三件套: 数据集 / 模型 / 实验
+## 四件套: 数据集 / 模型 / 实验 / 训练方式 (trainer)
 
-rundown 把这三件事做成「在 YAML 里声明 → CLI 一键跑」:
+rundown 把这四件事做成「在 YAML 里声明 → CLI 一键跑」:
 
 ### 1. 数据集 (configs/datasets.yaml)
 
@@ -333,6 +338,7 @@ uv run rundown experiment run etth1_lstm_size_sweep
 | `factory.target` | **models** | 注册表反射 | `examples.baseline.model.SequenceLSTM` |
 | `factory.kwargs` | **models** | `cls(**kwargs)` | `{in_dim: 6}` (固定结构) |
 | `variants` | **models** | `--variant large` | `{small: {hidden: 32}, large: {hidden: 128}}` (便捷预设) |
+| `default_trainer` | **models** | trainer 选择兜底 | `gradient` (内置) 或 `myproj.trainers.JointTrainer` |
 | `optimizer` (默认) | defaults.py | 单次训练的兜底 | `defaults.DEFAULT_OPTIMIZER = {kind: adam, lr: 1e-3}` |
 | `optimizer` (覆盖) | **experiments** | 扫描子进程 | `optimizer: {kind: adam, lr: 0.0005}` |
 | `dataset` | **experiments** | provider 反射 | `etth1` |
@@ -340,7 +346,62 @@ uv run rundown experiment run etth1_lstm_size_sweep
 | `epochs_max` | **experiments** | 引擎 | `5` (扫描跑短一点) |
 | `batch_size` / `steps_per_epoch` | **experiments** | 引擎 / provider | 覆盖默认 |
 | `variants` (列表) | **experiments** | 扫描笛卡尔积 | `[small, large, deep]` (引用 models 的键) |
+| `trainer` | **experiments** | trainer 选择 (sweep 透传) | `examples.custom_trainers.joint.JointTrainer` |
+| `trainer_config` | **experiments** | 透传给 trainer.fit | `{huber_delta: 0.5, alpha: 0.1}` |
+| `metric` | **experiments** | sweep 汇总指标 | `best_val_mse` / `best_val_loss` |
 | `--kwargs key=value` | CLI 透传 | 模型工厂 (`ModelEntry.build` → `cls(**kwargs)`) | 临时超参自由传 |
+| `--trainer NAME` | CLI | trainer 选择 (最高优先) | alias 或 dotted path |
+| `--trainer-config X` | CLI | 透传给 trainer.fit | JSON 字符串 或 YAML/JSON 文件 |
+
+### 4. 训练方式 (trainer) — 可选
+
+`models` / `datasets` / `experiments` 解决「跑什么」；`trainer` 解决「怎么训」。默认
+走内置 `gradient` (BPTT + MSE + 早停 + grad clip). 想换范式, 三种方式:
+
+**a. CLI 直接传 dotted path** — 不用注册, 适合一次性实验:
+
+```bash
+uv run rundown train --dataset etth1 --model lstm \
+    --trainer examples.custom_trainers.joint.JointTrainer \
+    --trainer-config '{"alpha": 0.1}' \
+    --epochs-max 5
+```
+
+**b. 注册到 `configs/trainers.yaml`** — 短名复用:
+
+```yaml
+trainers:
+  joint:
+    target: examples.custom_trainers.joint.JointTrainer
+  staged:
+    target: examples.custom_trainers.staged.StagedTrainer
+```
+
+```bash
+uv run rundown train --dataset etth1 --model lstm --trainer joint
+```
+
+**c. experiment sweep 透传** — `experiments.yaml` 加三字段:
+
+```yaml
+experiments:
+  custom_sweep:
+    dataset: etth1
+    model: lstm
+    epochs_max: 5
+    variants: [small]
+    trainer: examples.custom_trainers.joint.JointTrainer
+    trainer_config: {alpha: 0.1, aux_model: lstm, aux_variant: small}
+    metric: best_val_mse    # sweep 汇总读这个
+```
+
+**选择优先级** (高 → 低): CLI `--trainer` > `experiments.yaml.trainer` >
+`models.yaml.default_trainer` > 内置 `gradient`. 启动时 trainer name 写到
+`manifest.config.trainer`; trainer_config 以 dict 写到 `manifest.config.trainer_config`
+(子进程透传时才序列化为 JSON); `required_provider_keys` 列表写到
+`manifest.config.trainer_contract`; `primary_metric` 写到
+`manifest.config.primary_metric`. `trainer_config` 必须 JSON 可序列化, 启动前校验,
+失败 `ValueError`.
 
 **核心原则**:
 
@@ -373,10 +434,10 @@ uv run rundown experiment run etth1_lstm_size_sweep
 
 ```bash
 rundown prepare --dataset <alias>              # 加载数据集, 算内容哈希, 注册
-rundown train --dataset <ds> --model <m> [...] # 跑一次训练
-rundown experiment run <name>                  # 跑注册过的扫描 (笛卡尔积)
+rundown train --dataset <ds> --model <m> [--trainer X --trainer-config Y] # 跑一次训练
+rundown experiment run <name> [--trainer X]    # 跑注册过的扫描 (笛卡尔积)
 rundown read-run <run_id> [--metric X]         # 读已有运行, 算新指标
-rundown list-runs [filters]                    # 列出 artifacts/*/manifest.yaml
+rundown list-runs [--metric NAME] [filters]    # 列出 artifacts/*/manifest.yaml
 rundown compare <run_a> <run_b>                # 两个运行的 manifest 差异
 rundown inspect <run_id|--all> [--since-days N] # 读运行, 输出 README 风格的 Markdown
 rundown analyze --analyzer X <run_id>          # Phase 2 占位
@@ -384,15 +445,32 @@ rundown analyze --analyzer X <run_id>          # Phase 2 占位
 
 每个动词同时支持 CLI / Python (`from rundown.cli import main`) / Agent 调用.
 
+常用组合:
+
+```bash
+# 单次 train + 自定义 trainer
+rundown train --dataset etth1 --model lstm \
+    --trainer examples.custom_trainers.joint.JointTrainer \
+    --trainer-config '{"alpha": 0.1}' --epochs-max 5
+
+# sweep 时, CLI --trainer 覆盖 experiments.yaml.trainer
+rundown experiment run custom_sweep --trainer examples.custom_trainers.joint.JointTrainer
+
+# list-runs 自定义主指标列 (默认 best_val_mse; 改了 primary_metric 的跑用这个)
+rundown list-runs --metric best_val_loss
+```
+
 ### 给 Agent 调用方 (调用契约)
 
 **应该做**:
 
-- `--format json` 永远可用 (list-runs 是最先实现的, 后续动词会陆续加); 不解析 stderr 进度行.
+- `--format json` 在 `list-runs` 已实现 (其它查询动词按 README 契约逐步补齐); 不解析 stderr 进度行.
 - `artifacts/<run_id>/manifest.yaml` 是唯一真值来源 — 不要尝试从 events.jsonl 推断运行状态 (events 是事件流, 不是结构定义).
-- `rundown inspect <run_id> -q` 拉一份 README 风格的 Markdown — 含目的 / 设置 / 环境 / 结果 / 曲线 / 预测 / 事件 / 如何评估 / 产物共 8 段, 可喂给 LLM.
+- `rundown inspect <run_id> -q` 拉一份 README 风格的 Markdown — 含目的 / 设置 / 环境 / 结果 / 曲线 / 预测 / 事件 / 如何评估 / 产物共 8 段, 可喂给 LLM. custom trainer 的 `manifest.config.trainer` 会在 Setup 段显示; 通用 metrics / curves 表让任意 `stage1_train_loss` / `aux_train_loss` 都被渲染, 不破坏旧 artifact.
 - Python 入口: `from rundown.cli import main(argv)` / `from rundown.inspect_run import load_run, render_run_markdown`. 独立可用, 不需要 train / engine.
 - 运行排序用 manifest.created_at, 用 `--since-days N` 切时间窗 (UTC).
+- 读 trainer 信息从 `manifest.config.trainer` / `manifest.config.trainer_config` / `manifest.config.trainer_contract` / `manifest.config.primary_metric` (manifest `config` 段), 不要从文件名解析.
+- `list-runs --metric NAME` 指定主指标列 (默认 `best_val_mse`; custom trainer 写 `best_val_loss` 等时用这个); JSON 输出不变.
 
 **不要做**:
 
@@ -400,6 +478,7 @@ rundown analyze --analyzer X <run_id>          # Phase 2 占位
 - 不要假定产物路径不变; 唯一可靠入口是 `manifest.config` 里 `out_dir` / `_shared/code_<sha>/` 的引用.
 - 不要解析 stderr 上的进度行 — 那些 stderr 是给人看的, 会被 `--quiet` 压掉.
 - 不要用空格拆分 `events.jsonl` 的行 — 用 `line.split("  ", 2)` (Agent 友好格式里字段间是双空格).
+- 不要把 `--kwargs` 当 trainer 配置通道 — trainer 训练配置走 `--trainer-config` / `experiments.yaml.trainer_config`.
 
 **当 CLI 不可用时** (例如作为子模块调用, 无系统 Python): Python 入口仍然可用; `from rundown.inspect_run import load_run` 不依赖 CLI 解析.
 
@@ -463,7 +542,10 @@ rundown list-runs
 # 过滤: dataset=etth1 + model=lstm + best_val_mse < 2.0
 rundown list-runs --dataset etth1 --model lstm --below-metric best_val_mse 2.0
 
-# 给 Agent 用的 JSON
+# 自定义主指标列 — custom trainer 写了 best_val_loss / stage1_train_loss 时
+rundown list-runs --metric best_val_loss
+
+# 给 Agent 用的 JSON (字段不变, 一律全量)
 rundown list-runs --format json
 ```
 
@@ -549,6 +631,11 @@ uv run rundown train --dataset etth1 --model lstm --variant small --seed 0 \
 - **降级** — 缺 `pyyaml` / `safetensors` 时只读 `manifest.yaml`, 仍能渲染「设置 / 环境 / 结果」段.
 - **Agent 友好** — stdout 是干净的 Markdown, 可以 `cat` / `grep` / 喂给 LLM.
 - **Python 入口** — `from rundown.inspect_run import load_run, render_run_markdown` 直接当库用, 不一定要走 CLI.
+- **通用 metrics / curves** — 渲染 `manifest.metrics` 的所有键 (不只 `best_val_mse`),
+  以及 `curves.safetensors` 里所有 1-D 曲线 (custom trainer 写的 `stage1_train_loss` /
+  `aux_train_loss` 也都展示), 列数 cap 到 8 + 1 ellipsis 备注.
+- **Trainer 信息** — `manifest.config.trainer` 非空时, Setup 段加 `- **Trainer**:
+  \`custom_loss\`` 一行.
 
 ---
 
@@ -570,6 +657,10 @@ cli.py             CLI: train / experiment / list-runs / inspect …
 (`gradient`) 写在 `engine.py`; 自定义 trainer 通过 `--trainer` / `--trainer-config`
 接入, **不必** 改 `engine.py`.
 
+> 这一节是「**怎么写**自定义 trainer」的操作手册. Trainer 协议背景见上面
+> 「子系统 → Trainer」一节; 完整模板与 caveats 见
+> [`examples/custom_trainers/README.md`](examples/custom_trainers/README.md).
+
 ### `Trainer` 协议
 
 ```python
@@ -580,7 +671,7 @@ class MyTrainer:
     required_provider_keys = ("x", "y", "warm_start")
     primary_metric = "best_val_mse"        # 实验汇总读这个
 
-    def validate(self, providers): ...     # 训练前契约校验; 默认 no-op
+    def validate(self, providers): ...     # 训练前契约校验; 内置 gradient 为 no-op
     def fit(self, *, model, providers, ctx, session) -> TrainResult:
         # 训练循环: 走 session.emit / session.checkpoint_best /
         # session.write_curves / session.write_predictions / session.finalize.
@@ -817,6 +908,10 @@ config:
   predictions_primary: test_best     # 读取方读哪个 predictions
   step_event_every_n: 10
   grad_norm_threshold: 100.0
+  trainer: gradient                  # C2+: alias 或完整 dotted path
+  trainer_config: {}                 # C2+: trainer 训练配置 (dict; 子进程透传时序列化 JSON)
+  trainer_contract: [x, y, warm_start]  # C2+: required_provider_keys 快照
+  primary_metric: best_val_mse       # C2+: sweep 汇总 / inspect / list-runs 用的指标
 
 metrics: {best_val_mse: 2.27, epochs_to_best: 11, epochs_actual: 15}
 
@@ -851,46 +946,64 @@ env:
 rundown/
 ├── __init__.py
 ├── cli.py              # 8 个动词: prepare / train / experiment / read-run / list-runs / compare / inspect / analyze
-├── registry.py         # YAML 加载 + 反射绑定 + 别名校验 (datasets / models / experiments)
-├── engine.py           # GradientStrategy.fit() + per-step events + 自动记录 env
+├── registry.py         # YAML 加载 + 反射绑定 + 别名校验 (datasets / models / experiments / trainers)
+├── session.py          # RunSession: 一次 run 的生命周期 (start / emit / finalize / fail)
+├── trainers.py         # Trainer 协议 + GradientTrainer 适配器 + 别名/导入解析
+├── engine.py           # GradientStrategy: 内置 gradient trainer 的训练循环
 ├── artifact.py         # 写/读 manifest + weights + curves + predictions
 ├── _env.py             # capture_env() + snapshot_code() (自动记录宿主机环境 + 代码)
 ├── events.py           # emit() 全局事件发射器
-├── ids.py              # 别名 / run_id 正则校验
+├── ids.py              # 别名 / trainer_alias / run_id 正则校验
 ├── cli_query.py        # list_runs / compare_runs (glob manifest.yaml 直接读)
-├── experiment.py       # 扫描: 笛卡尔积 (子进程调 train)
+├── experiment.py       # 扫描: 笛卡尔积 (子进程调 train); trainer / trainer_config / metric 透传
 ├── defaults.py         # DEFAULT_BATCH_SIZE / DEFAULT_LR / DEFAULT_OPTIMIZER 等唯一真值来源
-├── inspect_run.py      # rundown inspect: 只读运行 → README 风格 Markdown
+├── inspect_run.py      # rundown inspect: 只读运行 → README 风格 Markdown; 通用 metrics / curves
 ├── facts/              # fact 系统: main_facts.yaml 索引 + 子 fact .md
-└── (12 个包文件 / 子包, 约 2600 行)
+└── (14 个包文件 / 子包)
 
 configs/
 ├── datasets.yaml
-├── models.yaml
-└── experiments.yaml
+├── models.yaml         # 含 default_trainer 字段 (C2+)
+├── experiments.yaml    # 含 trainer / trainer_config / metric 字段 (C3+)
+└── trainers.yaml       # 可选: trainer alias 注册表 (内置 gradient 不可覆盖)
 
 artifacts/              # 运行目录, 一个运行一个文件夹
 ├── _shared/            # 多次训练 / 扫描共享的代码快照池
+│   ├── code_<sha8>/
+│   ├── code_<sha8>.meta.json
+│   ├── code_<sha8>.zip
+│   └── code_<sha8>.zip.meta.json
 └── <run_id>/
 examples/
-└── baseline/           # ETTh1 内置 + LSTM + SlidingWindowProvider
-    ├── data/ETTh1.csv
-    ├── data.py
-    ├── model.py
-    ├── train.py        # 薄封装: 子进程调 rundown.cli train
-    └── test_baseline.py    # 4 个测试: 全链路 smoke
-tests/                  # pytest, 118 个测试 (与 examples/baseline 合计 122)
-├── fixtures.py         # ToyNet + RandomProvider
-├── test_smoke.py       # 75 个测试: 核心流程 / cli / registry / artifact / snapshot / events
+├── baseline/           # ETTh1 内置 + LSTM + SlidingWindowProvider
+│   ├── data/ETTh1.csv
+│   ├── data.py
+│   ├── model.py
+│   ├── train.py        # 薄封装: 子进程调 rundown.cli train
+│   └── test_baseline.py    # 4 个测试: 全链路 smoke
+└── custom_trainers/    # 自定义 trainer 模板 (C4)
+    ├── common.py             # seed / forward / state / evaluate / write_test_predictions
+    ├── custom_loss.py        # CustomLossTrainer (Huber + L1 weight)
+    ├── custom_loss.yaml      # 默认 trainer_config
+    ├── staged.py             # StagedTrainer (freeze backbone 后训 head)
+    ├── joint.py              # JointTrainer (主 + 辅模型, main.*/aux.* 前缀)
+    └── README.md
+tests/                  # pytest, 209 个测试 (与 examples/baseline 合计 213)
+├── fixtures.py         # ToyNet + RandomProvider + build_random_providers + DummyTrainer + IncompleteTrainer
+├── test_smoke.py       # 77 个测试: 核心流程 / cli / registry / artifact / snapshot / events
 ├── test_facts.py       # 15 个测试: facts 系统路径 / 模板 / 哲学边界
-├── test_inspect_run.py # 16 个测试: load_run / render / since_days / CLI
-└── test_time_and_metrics.py # 12 个测试: 指标异常 / UTC 时间戳 / since-days 解析
+├── test_inspect_run.py # 18 个测试: load_run / render / since_days / CLI
+├── test_session.py     # 10 个测试: RunSession 生命周期 / finalize 幂等 / fail 不复活
+├── test_time_and_metrics.py # 12 个测试: 指标异常 / UTC 时间戳 / since-days 解析
+├── test_trainers.py    # 31 个测试: Trainer 协议 / GradientTrainer / resolve_trainer / 别名
+├── test_experiment_trainer.py # 31 个测试: experiment run 透传 trainer / trainer_config / metric
+└── test_custom_trainers.py   # 15 个测试: examples/custom_trainers 三个模板
 AGENTS.md               # 给 AI Agent 看的约束文档
-pyproject.toml          # PEP 621 元数据 + [optuna] extras
+pyproject.toml          # PEP 621 元数据 + [optuna] extras (Phase 2 占位)
 uv.lock                 # 锁定的依赖版本 (提交进 git)
 ```
 
-13 个包文件 / 子包, 约 2500 行. 完整跑通 ETTh1 (17k 行真实数据) + 2 层 LSTM,
+完整跑通 ETTh1 (17k 行真实数据) + 2 层 LSTM,
 测试 MSE ≈ 1.10 (标准化空间), **对齐 ETT 论文基准**.
 
 ---
@@ -901,6 +1014,8 @@ uv.lock                 # 锁定的依赖版本 (提交进 git)
 - 你的论文要发出去, 你担心 18 个月后复现不出来 → 用 rundown
 - 你的实验代码会被同事 / 审稿人 / Agent 接手 → 用 rundown
 - 你想批量扫描 (当前支持笛卡尔积) 而不想手写循环 → 用 rundown
+- 你想跑自定义 loss / 分阶段 / 多模型 / 蒸馏, 但不想 fork 整个训练循环 → 用 rundown
+  (走 `--trainer` + `examples/custom_trainers/` 模板)
 - 你只是想跑 1 次演示, 跑完就丢 → **别用, 直接用 PyTorch**
 
 ## 什么时候**不要**用 rundown
@@ -921,7 +1036,7 @@ uv.lock                 # 锁定的依赖版本 (提交进 git)
 | 内容 | 位置 |
 |------|------|
 | 模块边界 / 谁能 import 什么 | `AGENTS.md` §1 |
-| 反模式 (不要做的 8 件事) | `AGENTS.md` §2 |
+| 反模式 (不要做的 13 件事) | `AGENTS.md` §2 |
 | 命名规范 (dataset_alias / model_id / run_id 正则) | `AGENTS.md` §3 |
 | 测试要求 / 跑通门槛 | `AGENTS.md` §4 |
 | 禁止的 import (lint 规则: pickle / torch.save / matplotlib / seaborn / plotly) | `AGENTS.md` §5 |
@@ -941,9 +1056,10 @@ uv.lock                 # 锁定的依赖版本 (提交进 git)
 
 README 与 AGENTS.md 应一起读, 但顺序很重要:
 
-1. **本文档** — 先理解设计哲学 + 5 个子系统 + 怎么上手. 给「做什么」/「不做什么」/「机制对应痛点」的叙述性答案.
-2. **`AGENTS.md`** — 当你要 *写* 代码进来 (新模型 / 新数据集 / PR), 读这个. 给你 lint / 规则 / 反模式的硬约束.
+1. **本文档** — 先理解设计哲学 + 6 个子系统 + 怎么上手. 给「做什么」/「不做什么」/「机制对应痛点」的叙述性答案.
+2. **`AGENTS.md`** — 当你要 *写* 代码进来 (新模型 / 新数据集 / 新 trainer / PR), 读这个. 给你 lint / 规则 / 反模式的硬约束.
 3. **`examples/baseline/`** — 当你要 *适配* rundown 到自己项目时, 这是唯一事实来源: 改 `data.py` + `model.py` + `train.py` 三处.
+4. **`examples/custom_trainers/`** — 当你要写自定义 loss / 分阶段 / 联合训练时, 这是 trainer 模板的入口.
 
 ---
 
