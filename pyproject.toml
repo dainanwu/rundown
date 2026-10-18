@@ -16,8 +16,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
-# optuna 用于 `experiment run --mode optuna` 智能超参搜索. 不安装 optuna
-# 也能跑实验 (mode=cartesian 是默认且唯一不依赖 optuna 的模式).
+# optuna 预留给未来的 optuna 智能超参模式 (Phase 2); 当前 `experiment run`
+# 只支持 cartesian 笛卡尔积扫描, 不需要 optuna. 不安装也能正常跑实验.
 optuna = ["optuna>=3.0"]
 
 [project.scripts]

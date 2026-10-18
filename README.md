@@ -29,8 +29,9 @@ curves / predictions 自动落到磁盘，用 manifest 当索引 —— 6 个月
    你 / 审稿人 / Agent 拿到汇总视图后不用再拼。
 
 5. **痛点 E —— 跑完 30 次，「method_v2 比 baseline 强 12%」这类主观结论自己记得，审稿人却没法追溯**
-   → 回应：**Fact（事实）**由 manifest 自动写事实，把主观判断写到 `artifacts/_facts/*.md`
-   并标记状态，走完整的生命周期。
+   → 回应：**Fact（事实）**是一组**手动写的事实卡**，把主观判断写到 `artifacts/_facts/*.md`
+   并标记状态，走完整的生命周期。`manifest.yaml` 仍是自动写的事实记录（机器可读），
+   fact 文件写的是人脑下的判断，两层互不替代。
 
 每个子系统的具体机制见下面「rundown 的子系统」一节 —— 五对五，一一对应。
 
@@ -95,7 +96,7 @@ tensorboard、wandb。选择理由：每个被拒绝的包都在试图替使用�
 
 - **不是特征工程框架。** 窗口化、列名、掩码、时间特征——这些由你声明，rundown 不感知。
 - **不是实验追踪器。** 一次运行一个目录。要看板，用 MLflow 适配器。
-- **不是调参工具。** Optuna 是 [extras]，扫描模式下走 `rundown experiment run`。
+- **不是调参工具。** Optuna 是 [extras]（当前未接线，预留给 Phase 2）; `rundown experiment run` 目前只跑 cartesian 笛卡尔积扫描。
 - **不是部署平台。** rundown 的产物是 `.safetensors`，不是 Docker 镜像。
 - **不是深度学习框架。** 没有自动微分的魔法，没有 DSL，没有构建系统。
 
@@ -211,7 +212,7 @@ uv run rundown train --dataset etth1 --model lstm  # 用 .venv 跑命令
 uv run pytest                                    # 跑测试
 ```
 
-可选: `uv sync --extra optuna` 装 optuna 启用 experiment 的 optuna 模式.
+可选: `uv sync --extra optuna` 仅供未来 optuna 模式占位; 当前 `experiment run` 只支持 cartesian 笛卡尔积扫描, 不需要 optuna.
 
 不用 uv 也行:
 
@@ -339,14 +340,14 @@ uv run rundown experiment run etth1_lstm_size_sweep
 | `epochs_max` | **experiments** | 引擎 | `5` (扫描跑短一点) |
 | `batch_size` / `steps_per_epoch` | **experiments** | 引擎 / provider | 覆盖默认 |
 | `variants` (列表) | **experiments** | 扫描笛卡尔积 | `[small, large, deep]` (引用 models 的键) |
-| `--kwargs key=value` | CLI 透传 | engine.fit | optuna 扫描自由传 |
+| `--kwargs key=value` | CLI 透传 | 模型工厂 (`ModelEntry.build` → `cls(**kwargs)`) | 临时超参自由传 |
 
 **核心原则**:
 
 - **models** = 「一个 PyTorch 类 + 默认 kwargs + 便捷预设」。它不知道训练时长、不知道用哪个优化器、不知道跑什么数据集。
 - **experiments** = 「一次扫描的设置」。它决定用哪个模型 / 数据集 / 优化器，训练多久，扫描哪些变体。
 - **defaults.py** = 「单次 `rundown train`（无实验）的唯一真值来源」。扫描时由实验覆盖。
-- **`--kwargs`** = 「运行时透传，与 YAML 正交」。optuna / Agent 用，绕过 variants 限制。
+- **`--kwargs`** = 「运行时透传，与 YAML 正交」。Agent / 临时调一组超参用，绕过 variants 限制。
 
 **老配置向后兼容**: models.yaml 里的 `optimizer:` / `epochs_max:` 字段会被静默忽略（不再读取）。新配置应删掉这些字段——见 `test_load_models_ignores_optimizer_field`。
 
@@ -409,17 +410,22 @@ rundown analyze --analyzer X <run_id>          # Phase 2 占位
 ### `--kwargs KEY=VALUE` — 透传任意超参给模型工厂
 
 `models.variants` 是**便捷预设**（`small` / `large` / `deep` 是常见规模组合）。
-**optuna 扫描或临时超参**用 `--kwargs` 自由传, 绕过 variants 限制:
+**临时超参**用 `--kwargs` 自由传, 绕过 variants 限制: `--kwargs` 只把键值
+合并到模型工厂的 `**kwargs`（`ModelEntry.build` → `cls(**kwargs)`），不会
+触达 optimizer / 引擎 / 数据加载器。
 
 ```bash
 # 透传多个 — 合并顺序: factory_kwargs < variants < --kwargs (后者覆盖)
 uv run rundown train --model lstm --variant small \
   --kwargs hidden=128 --kwargs num_layers=2
 
-# optuna 调 rundown 时 (任意超参, 不用预注册 variant)
+# 临时调一组超参 (不用预注册 variant; 都进模型工厂)
 uv run rundown train --model lstm \
-  --kwargs hidden=$HIDDEN --kwargs lr=$LR
+  --kwargs hidden=$HIDDEN --kwargs num_layers=$NLAYERS
 ```
+
+**注意**: optimizer 学习率走 `--lr`（不是 `--kwargs lr=...`）。`--kwargs`
+只到达模型工厂；传 `--kwargs lr=...` 一般会让 `cls(**kwargs)` 抛 `TypeError`。
 
 值类型自动判断: `int` / `float` / `bool` / `str`.
 
@@ -619,9 +625,9 @@ __pycache__/
 artifacts/
 ├── _shared/                              # 扫描 / 多次训练同代码共享的快照池
 │   ├── code_<sha8>/                      # git 仓库项目: `git archive` 输出 tar 目录 (首选)
-│   │   └── .meta.json                    # sha256 / size_bytes / num_files
+│   ├── code_<sha8>.meta.json             # tar 模式的元数据 (sha256 / size_bytes / num_files), sweep (experiment run) 写
 │   ├── code_<sha8>.zip                   # 非 git 仓库项目: zip 全目录 (排除 artifacts/.venv/__pycache__)
-│   └── code_<sha8>.zip.meta.json         # .zip 模式的元数据伴生文件
+│   └── code_<sha8>.zip.meta.json         # .zip 模式的元数据伴生文件, sweep (experiment run) 写
 └── <run_id>/                             # 每次运行一个目录
     ├── manifest.yaml
     ├── weights.safetensors
@@ -633,6 +639,10 @@ artifacts/
     │   └── test_best.safetensors
     └── (run_dir 内无 code_* — 引用 ../_shared/code_<sha8>)
 ```
+
+`<sha8>.meta.json` 是 sweep (`rundown experiment run`) 写的, 单次 `rundown train` 不会产生.
+tar 模式的 `code_<sha8>/` 是裸目录, 元数据用同级 `code_<sha8>.meta.json` 承载;
+zip 模式同理, `.meta.json` 与 `.zip` 平级.
 
 **默认行为**: `rundown train --out-dir artifacts` 跑完一次后, 快照落在 `artifacts/_shared/code_xxx/` 或 `code_xxx.zip` (取决于是否 git 仓库), run_dir 内**没有**自己的代码副本. 多次训练同代码 → 自动跳过写入, 物理上只有一份.
 
@@ -733,12 +743,13 @@ examples/
     ├── data.py
     ├── model.py
     ├── train.py        # 薄封装: 子进程调 rundown.cli train
-    └── test_baseline.py
-tests/                  # pytest, 103 个测试
+    └── test_baseline.py    # 4 个测试: 全链路 smoke
+tests/                  # pytest, 118 个测试 (与 examples/baseline 合计 122)
 ├── fixtures.py         # ToyNet + RandomProvider
-├── test_smoke.py       # 68 个测试: 核心流程 / cli / registry / artifact / snapshot / events
+├── test_smoke.py       # 75 个测试: 核心流程 / cli / registry / artifact / snapshot / events
 ├── test_facts.py       # 15 个测试: facts 系统路径 / 模板 / 哲学边界
-└── test_inspect_run.py # 16 个测试: load_run / render / since_days / CLI
+├── test_inspect_run.py # 16 个测试: load_run / render / since_days / CLI
+└── test_time_and_metrics.py # 12 个测试: 指标异常 / UTC 时间戳 / since-days 解析
 AGENTS.md               # 给 AI Agent 看的约束文档
 pyproject.toml          # PEP 621 元数据 + [optuna] extras
 uv.lock                 # 锁定的依赖版本 (提交进 git)
@@ -754,7 +765,7 @@ uv.lock                 # 锁定的依赖版本 (提交进 git)
 - 你跑了 ≥ 3 次实验, 开始记不住哪次用了什么配置 → 用 rundown
 - 你的论文要发出去, 你担心 18 个月后复现不出来 → 用 rundown
 - 你的实验代码会被同事 / 审稿人 / Agent 接手 → 用 rundown
-- 你想批量扫描 (笛卡尔积或 optuna) 而不想手写循环 → 用 rundown
+- 你想批量扫描 (当前支持笛卡尔积) 而不想手写循环 → 用 rundown
 - 你只是想跑 1 次演示, 跑完就丢 → **别用, 直接用 PyTorch**
 
 ## 什么时候**不要**用 rundown

@@ -251,6 +251,27 @@ def _run_dirs(root: Path) -> List[Path]:
     return sorted([p for p in root.iterdir() if p.is_dir() and not p.name.startswith("_")])
 
 
+def _parse_created_at(value: Any) -> Optional[datetime]:
+    """Parse manifest.created_at, returning an aware datetime or None.
+
+    - non-str / empty / unparseable → None (caller skips recency filter, no crash)
+    - naive iso string → attach LOCAL timezone (legacy manifests were produced
+      by `datetime.now().isoformat(...)` which is local naive)
+    - aware iso string → leave as-is (already self-describing)
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+    if ts.tzinfo is None:
+        # `datetime.astimezone()` on a naive datetime treats it as local time
+        # and attaches the local tz. Matches the historical `datetime.now()` producer.
+        ts = ts.astimezone()
+    return ts
+
+
 def iter_recent_runs(
     root: Path = Path("artifacts"),
     *,
@@ -276,13 +297,7 @@ def iter_recent_runs(
         except FileNotFoundError:
             continue
         if cutoff is not None and run.created_at:
-            try:
-                ts = datetime.fromisoformat(run.created_at)
-                # `tzinfo` is an attribute on datetime, not a method.
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                ts = None
+            ts = _parse_created_at(run.created_at)
             if ts is not None and ts < cutoff:
                 continue
         if dataset:

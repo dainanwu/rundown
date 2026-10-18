@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import yaml
+
 from .defaults import DEFAULT_STEPS_PER_EPOCH
 from ._env import snapshot_code
 
@@ -78,9 +80,13 @@ def run_experiment(
     snap_info = snapshot_code(shared_dir, cwd=Path.cwd())
     snap_meta_path: Optional[Path] = None
     if snap_info:
-        snap_meta_path = shared_dir / f"{snap_info['archive_path']}.meta.json"
+        # meta 文件必须落在 _shared/ 级别 (snapshot 归档的 sibling), 不能进
+        # tar 解压出来的 code_<sha8>/ 内部 — 那会被 snapshot 复制覆盖, 而且
+        # inspect_run._resolve_code_snapshot() 只在 _shared/ 顶层找 meta.
+        snap_meta_path = _snapshot_meta_path(shared_dir, snap_info)
         # archive_path 在 shared_dir 内 (e.g. "code_86f357f6.zip"); subprocess 视角
         # 应是相对 out_root 的路径 (out_root/_shared/code_xxx.zip → _shared/code_xxx.zip).
+        # 写进 JSON 的 archive_path 字段本身保持原值不变.
         snap_info_dict = dict(snap_info)
         snap_info_dict["archive_path"] = f"_shared/{snap_info['archive_path']}"
         snap_meta_path.write_text(
@@ -124,7 +130,7 @@ def run_experiment(
                                        trial_dir, run_id, dt, proc.returncode or 1))
             continue
 
-        best_val = _read_best_val_from_events(trial_dir)
+        best_val = _read_best_val(trial_dir)
         results.append(TrialResult(variant_name, seed_base + i, best_val,
                                    trial_dir, run_id, dt, 0))
         bv_str = f"{best_val:.4f}" if best_val is not None else "n/a"
@@ -149,8 +155,54 @@ def run_experiment(
     return results
 
 
-def _read_best_val_from_events(run_dir: Path) -> Optional[float]:
-    """从 events.jsonl 读 run_completed 事件的 best_val 字段."""
+def _snapshot_meta_path(shared_dir: Path, snap_info: Dict[str, Any]) -> Path:
+    """sweep 入口写 snapshot meta json 的 sibling 路径.
+
+    旧实现 ``shared_dir / f"{archive_path}.meta.json"`` 在 tar 模式下会拼
+    ``_shared/code_<sha8>/.meta.json`` — 那是 *tar 解压目录内部* 的路径, meta
+    会被 snapshot 复制进来, 而且 inspect_run._resolve_code_snapshot() 只在
+    _shared/ 顶层找 ``code_<sha>.meta.json`` / ``code_<sha>.zip.meta.json``,
+    找不到会回退到自建.
+
+    规则: meta 文件是 archive 的 sibling, 始终在 _shared/ 顶层:
+      tar: archive_path="code_<sha8>/"       → ``code_<sha8>.meta.json``
+      zip: archive_path="code_<sha8>.zip"    → ``code_<sha8>.zip.meta.json``
+
+    写进 meta JSON 里的 ``archive_path`` 字段保持原值不变 (调用方决定).
+    """
+    archive = snap_info["archive_path"]
+    if archive.endswith("/"):
+        # tar: 把尾部 / 去掉 — "code_<sha8>" 即 stem
+        stem = archive.rstrip("/")
+    else:
+        # zip: 完整文件名作 stem
+        stem = archive
+    return shared_dir / f"{stem}.meta.json"
+
+
+def _read_best_val(run_dir: Path) -> Optional[float]:
+    """读 run 的 best_val_mse.
+
+    优先 ``manifest.yaml.metrics.best_val_mse`` (项目唯一真值来源);
+    manifest 缺失 / 不可解析 / 字段不是 numeric 时, fall back 到
+    ``events.jsonl`` 的 ``run_completed.best_val`` 字段.
+
+    返回 ``Optional[float]``.
+    """
+    manifest_path = run_dir / "manifest.yaml"
+    if manifest_path.exists():
+        try:
+            data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                metrics = data.get("metrics")
+                if isinstance(metrics, dict):
+                    v = metrics.get("best_val_mse")
+                    if isinstance(v, (int, float)):
+                        return float(v)
+        except (yaml.YAMLError, OSError):
+            pass
+
+    # Fallback: events.jsonl (兼容 manifest 缺失 / 损坏 / 无 numeric best_val_mse)
     p = run_dir / "events.jsonl"
     if not p.exists():
         return None

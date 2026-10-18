@@ -229,14 +229,19 @@ class GradientStrategy:
                 patience = 0
             else:
                 patience = (epoch - best_epoch)
-                if patience >= self.early_stop_patience:
-                    early_stopped = True
-                    emit("early_stopped", run_id=ctx.run_id, epoch=epoch, best_epoch=best_epoch, best_val=best_val)
-                    break
 
+            # epoch_completed 必须对每一次"实际跑过"的 epoch 都写, 包括
+            # 触发 early stop 的那一轮 — 与 curves.val_mse 长度 / epochs_actual
+            # 一一对应. early_stopped 在它之后立即写, 再 break.
             emit("epoch_completed", run_id=ctx.run_id, epoch=epoch,
                  train_loss=train_losses[-1], val_mse=val_mse, lr=ctx.lr,
                  best_val=best_val, best_epoch=best_epoch)
+
+            if patience >= self.early_stop_patience:
+                early_stopped = True
+                emit("early_stopped", run_id=ctx.run_id, epoch=epoch,
+                     best_epoch=best_epoch, best_val=best_val)
+                break
 
         # ---- 写最终产物 ----
         # 保存 final state (CPU contiguous, 不依赖 model 当前 device)

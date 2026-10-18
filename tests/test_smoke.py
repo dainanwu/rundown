@@ -1526,3 +1526,207 @@ class TestSweepSnapshotPool:
         # meta 缺失/损坏 → 返回 None (走自建 fallback)
         assert _load_external_snapshot(None, run_dir) is None
         assert _load_external_snapshot(tmp_path / "nope.json", run_dir) is None
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the four bug fixes (Fix A/B/C/D)
+# ---------------------------------------------------------------------------
+class TestFixA_ReactivationTruncatesEvents:
+    """Fix A: set_active_log() on the same run_dir unlinks any existing events.jsonl.
+
+    旧实现只 mkdir + 设 module global, 重激活同一 run_dir 时旧 events.jsonl
+    被 append, 新旧事件混在一起. 修后激活时主动 unlink 残留文件.
+    """
+    def test_reactivate_clears_old_events(self, tmp_path):
+        from rundown.events import set_active_log, clear_active_log, set_quiet, emit
+        import json as _json
+
+        set_quiet(False)
+        run_id = "my_run"
+        try:
+            # 第一次激活 + emit A
+            events_path = set_active_log(tmp_path, run_id)
+            assert not events_path.exists(), "first activation 不应 eager create"
+            emit("epoch_completed", epoch=1, train_loss=0.42)
+            assert events_path.exists()
+            lines = events_path.read_text(encoding="utf-8").strip().split("\n")
+            assert len(lines) == 1
+            clear_active_log()
+
+            # 第二次激活同目录 — 应清掉旧 events.jsonl (且不 eager create)
+            events_path2 = set_active_log(tmp_path, run_id)
+            assert not events_path2.exists(), "重激活不应 eager create"
+            emit("step_completed", epoch=99, step=1, train_loss=0.7)
+            lines = events_path2.read_text(encoding="utf-8").strip().split("\n")
+            assert len(lines) == 1, f"重激活后应只有新 1 行, got {len(lines)}"
+            rec = _json.loads(lines[0])
+            assert rec["kind"] == "step_completed"
+            assert rec["epoch"] == 99
+            # 旧 epoch_completed 已被丢掉
+            kinds = [rec["kind"]]
+            assert kinds == ["step_completed"], kinds
+        finally:
+            clear_active_log()
+            set_quiet(False)
+
+
+class TestFixB_EarlyStopEmitsAllEvents:
+    """Fix B: epoch_completed 对每一次跑过的 epoch 都写 (含触发 early stop
+    的那一轮), 紧跟 early_stopped 再 break. curves.val_mse 长度与 epoch_completed
+    计数对齐.
+    """
+    def test_early_stop_emits_epoch_completed_then_early_stopped(self, tmp_path):
+        import torch
+        import torch.nn as nn
+        from rundown.artifact import RunArtifact, RunManifest
+        from rundown.engine import EngineConfig, GradientStrategy
+        from rundown.events import (
+            set_active_log, clear_active_log, set_quiet,
+        )
+        from safetensors.torch import load_file
+        import json as _json
+
+        # 本地 no-op 模型: forward 返回常值 0.0, 但 nn.Parameter 让 loss.backward() 有梯度.
+        class _ConstModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.constant = nn.Parameter(torch.zeros(()))
+
+            def forward(self, x, warm_start=0):
+                B, T = x.shape[0], x.shape[1] - warm_start
+                return self.constant.expand(B, T)
+
+        # 全零 BatchProvider: 任何模型的 val_mse 都 = 0 (constant 预测零, target 零),
+        # early_stop_patience=1 下 epoch 1 触发 best_val=0; epoch 2 同样的 0 不再算更好,
+        # patience = 2 - 1 = 1 → trigger.
+        class _ZerosProvider:
+            def __init__(self, *, in_dim, warm_start=4, rollout=4, batch_size=2):
+                self.in_dim = in_dim
+                self.warm_start = warm_start
+                self.seq_len = warm_start + rollout + 1
+                self.batch_size = batch_size
+
+            def __call__(self, split="train"):
+                x = torch.zeros(self.batch_size, self.seq_len, self.in_dim)
+                y = torch.zeros(self.batch_size, self.seq_len)
+                return {"x": x, "y": y, "warm_start": self.warm_start}
+
+        set_quiet(False)
+        run_id = "toy__smoke__seed0"
+        run_dir = tmp_path / "artifacts" / run_id
+        set_active_log(run_dir, run_id)
+        try:
+            manifest = RunManifest(
+                run_id=run_id, created_at="2026-10-18T00:00:00", seed=0,
+                dataset={"alias": "smoke"}, model={"alias": "toy"},
+                config={"epochs_max": 4},
+            )
+            artifact = RunArtifact(run_dir=run_dir, manifest=manifest)
+            artifact.save_manifest()
+
+            model = _ConstModel()
+            p = _ZerosProvider(in_dim=7, warm_start=4, rollout=4, batch_size=2)
+            ctx = EngineConfig(
+                run_id=run_id, seed=0, epochs_max=4, batch_size=2,
+                steps_per_epoch=1,
+            )
+            result = GradientStrategy(early_stop_patience=1).fit(
+                model, train_data=p, val_data=p, test_data=p,
+                ctx=ctx, artifact=artifact,
+            )
+            assert result["epochs_actual"] == 2, result
+            assert result["early_stopped"] is True
+        finally:
+            clear_active_log()
+            set_quiet(False)
+
+        # 事件 — 读回 events.jsonl
+        events = [
+            _json.loads(line) for line in
+            (run_dir / "events.jsonl").read_text(encoding="utf-8").strip().split("\n")
+            if line.strip()
+        ]
+        kinds = [e["kind"] for e in events]
+        epoch_events = [e for e in events if e["kind"] == "epoch_completed"]
+        early_events = [e for e in events if e["kind"] == "early_stopped"]
+        assert len(epoch_events) == 2, f"want 2 epoch_completed, got {len(epoch_events)}: {kinds}"
+        assert len(early_events) == 1, f"want 1 early_stopped, got {len(early_events)}: {kinds}"
+
+        # 顺序: epoch_completed(1), epoch_completed(2), early_stopped
+        ep_idx = [i for i, k in enumerate(kinds) if k == "epoch_completed"]
+        es_idx = [i for i, k in enumerate(kinds) if k == "early_stopped"]
+        assert ep_idx == sorted(ep_idx), "epoch_completed 必须按 epoch 顺序出现"
+        assert len(ep_idx) == 2 and len(es_idx) == 1
+        # 触发 early stop 的那一轮 (epoch 2) 的 epoch_completed 必须在 early_stopped 之前
+        assert ep_idx[-1] < es_idx[0], (
+            f"trigger epoch 的 epoch_completed ({ep_idx[-1]}) 必须在 "
+            f"early_stopped ({es_idx[0]}) 之前 — kinds={kinds}"
+        )
+
+        # curves.safetensors val_mse 长 == epochs_actual
+        curves = load_file(str(run_dir / "curves.safetensors"))
+        assert curves["val_mse"].shape[0] == 2, curves["val_mse"].shape
+
+
+class TestFixC_SnapshotMetaPath:
+    """Fix C: _snapshot_meta_path() 算 sibling 路径, 不写到 tar 解压目录内部."""
+    def test_tar_archive_strips_trailing_slash(self, tmp_path):
+        from rundown.experiment import _snapshot_meta_path
+        snap_info = {"archive_path": "code_abcd1234/"}
+        p = _snapshot_meta_path(tmp_path, snap_info)
+        assert p == tmp_path / "code_abcd1234.meta.json"
+
+    def test_zip_archive_appends_meta_json(self, tmp_path):
+        from rundown.experiment import _snapshot_meta_path
+        snap_info = {"archive_path": "code_abcd1234.zip"}
+        p = _snapshot_meta_path(tmp_path, snap_info)
+        assert p == tmp_path / "code_abcd1234.zip.meta.json"
+
+
+class TestFixD_ReadBestValPrefersManifest:
+    """Fix D: _read_best_val() 优先 manifest.yaml, events.jsonl 仅 fallback."""
+    def test_prefers_manifest_over_events(self, tmp_path):
+        from rundown.experiment import _read_best_val
+        import yaml as _yaml
+        import json as _json
+
+        run_dir = tmp_path / "run_with_both"
+        run_dir.mkdir()
+        (run_dir / "manifest.yaml").write_text(
+            _yaml.safe_dump({"metrics": {"best_val_mse": 0.123}}),
+            encoding="utf-8",
+        )
+        (run_dir / "events.jsonl").write_text(
+            _json.dumps({
+                "kind": "run_completed",
+                "best_val": 9.9,
+                "run_id": "x", "epochs_actual": 1, "early_stopped": False,
+                "t": 0.0, "t_iso": "2026-10-18T00:00:00",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        # manifest 是 ground truth, 即便 events 里有 9.9 也应该拿到 0.123
+        assert _read_best_val(run_dir) == 0.123
+
+    def test_fallback_to_events_when_manifest_missing(self, tmp_path):
+        from rundown.experiment import _read_best_val
+        import json as _json
+
+        run_dir = tmp_path / "events_only"
+        run_dir.mkdir()
+        (run_dir / "events.jsonl").write_text(
+            _json.dumps({
+                "kind": "run_completed",
+                "best_val": 5.5,
+                "run_id": "y", "epochs_actual": 2, "early_stopped": False,
+                "t": 0.0, "t_iso": "2026-10-18T00:00:00",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        assert _read_best_val(run_dir) == 5.5
+
+    def test_no_manifest_no_events_returns_none(self, tmp_path):
+        from rundown.experiment import _read_best_val
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        assert _read_best_val(empty) is None

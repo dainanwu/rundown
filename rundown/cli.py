@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "key 不在 factory 签名时由 factory 抛 TypeError (不静默).")
 
     ep = sub.add_parser("experiment", parents=[quiet],
-                        help="跑一个注册过的实验 (默认笛卡尔积 sweep; mode=optuna 切换)")
+                        help="跑一个注册过的实验 (当前仅支持笛卡尔积 sweep)")
     exp_p = ep.add_subparsers(dest="exp_cmd", required=True)
     erun = exp_p.add_parser("run", parents=[quiet], help="跑实验")
     erun.add_argument("name", help="experiments.yaml 里的实验名")
@@ -127,6 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
 def _err(msg: str) -> int:
     print(f"ERROR: {msg}", file=sys.stderr)
     return 2
+
+
+def _utc_now_iso() -> str:
+    """UTC-now ISO 8601 with offset, second precision.
+
+    Used for manifest.created_at and read-run --write-back.computed_at so that
+    --since-days (which compares against UTC) lines up.
+    """
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +243,6 @@ def _cmd_train(args: argparse.Namespace) -> int:
     from .artifact import RunManifest, RunArtifact
     from .engine import EngineConfig, GradientStrategy
     from .events import set_active_log, clear_active_log
-    import datetime as _dt
     import time as _time
 
     assert_valid("dataset_alias", args.dataset)
@@ -322,7 +331,7 @@ def _cmd_train(args: argparse.Namespace) -> int:
     # ----- Run manifest -----
     manifest = RunManifest(
         run_id=run_id,
-        created_at=_dt.datetime.now().isoformat(timespec="seconds"),
+        created_at=_utc_now_iso(),
         seed=int(args.seed),
         dataset={
             "alias": dataset.alias,
@@ -392,10 +401,14 @@ def _cmd_train(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 def _compute_metric(predictions: Dict, metric: str, by: Optional[str]) -> Dict[str, float]:
     """从 predictions 字典算指标. 默认读 primary (manifest.config.predictions_primary)."""
-    err = predictions.get("y_hat") - predictions.get("y_true")  # may be None
     if metric == "prediction_error_std":
-        if err is None:
-            raise ValueError("predictions missing y_hat / y_true")
+        y_hat = predictions.get("y_hat")
+        y_true = predictions.get("y_true")
+        if y_hat is None or y_true is None:
+            raise ValueError(
+                f"predictions missing y_hat / y_true (keys: {sorted(predictions)})"
+            )
+        err = y_hat - y_true
         if by is None:
             return {"total": float(err.std().item())}
         # by = "quantile:N" 把 y_hat 沿 horizon 切 N 桶
@@ -461,7 +474,7 @@ def _cmd_read_run(args: argparse.Namespace) -> int:
 
     if args.write_back:
         art.manifest.derived_metrics[args.metric] = {
-            "computed_at": _dt_now(),
+            "computed_at": _utc_now_iso(),
             "by": args.by,
             "values": vals,
         }
@@ -469,11 +482,6 @@ def _cmd_read_run(args: argparse.Namespace) -> int:
         emit("metric_written_back", run_id=args.run_id, metric=args.metric)
         print(f"[rundown] written back to {run_dir / 'manifest.yaml'}")
     return 0
-
-
-def _dt_now() -> str:
-    import datetime as _dt
-    return _dt.datetime.now().isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------

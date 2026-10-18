@@ -30,7 +30,9 @@ benchmark for Informer / Autoformer / PatchTST / LSTNet.
 include an LSTM baseline alongside the proposed Transformer; this is the
 canonical shape. The head is a `Linear(hidden, 1)` applied per time step.
 
-Task: given 24 hours of lookback, predict 24 hours ahead.
+Window: a 24-step warm-up prefix plus a 25-step forecast window
+(`window_len = warm_start + rollout + 1`). The example model consumes the
+forecast window (`x[:, warm_start:]`) and emits 25 values.
 
 ## Run it
 

@@ -6,7 +6,7 @@ MVP 实现:
   - rundown.registry:   YAML 注册表 + 反射绑定.
   - rundown.artifact:   run 目录的写/读 (manifest + weights + curves + predictions).
   - rundown.engine:     GradientStrategy.fit() (MVP 唯一策略).
-  - rundown.cli:        7 个动词 (prepare / train / experiment / read-run / list-runs / compare / analyze).
+  - rundown.cli:        8 个动词 (prepare / train / experiment / read-run / list-runs / compare / inspect / analyze).
   - rundown.cli_query:  list-runs / compare 的 artifact-ground-truth 查询.
   - rundown._env:       capture_env + snapshot_code (autolog host env + code snapshot).
   - rundown.facts:      fact 系统 (main_facts.yaml + 子 fact markdown, 手动保存).

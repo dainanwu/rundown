@@ -10,6 +10,10 @@
 
 不在 run 上下文时, emit() 只写 stderr, 不落文件.
 
+每次 set_active_log() 会 unlink 同一 run_dir 下残留的 events.jsonl, 保证新
+run 从空白事件流开始; 但不 eager create 文件 — 第一次 emit() 才会落盘.
+IO 错误 (含 unlink 失败) 不会被吞, 直接抛给调用方.
+
 stderr 行格式 (agent 友好 — 统一前缀 + JSON 字段值):
     {t_iso}  {kind}  {json.dumps(fields)}
 例:
@@ -36,13 +40,28 @@ _QUIET: bool = False  # True 时 emit() 不写 stderr (events.jsonl 仍写, arti
 
 
 def set_active_log(run_dir: Path, run_id: str) -> Path:
-    """在 run 启动时调用. 创建 run_dir 并返回 events.jsonl 路径."""
+    """在 run 启动时调用.
+
+    1. 创建 run_dir (parents=True, exist_ok=True).
+    2. unlink 任何已存在的 events.jsonl — 同 run_dir 被重新激活 (例如
+       interrupt + 重跑 / agent 重复触发同名 run) 时, 旧事件流会被静默累积
+       进新 run 的文件; 主动清掉, 保证新 run 从干净 stream 开始.
+    3. 不 eager create 文件; 第一次 emit() 才会落 events.jsonl (旧 test
+       锁住的契约).
+    4. IO 错误 (含 unlink 失败 / permission denied) 不吞, 直接抛出 —
+       跟「不擅自替你修」一致.
+
+    返回 events.jsonl 路径.
+    """
     global _ACTIVE_DIR, _ACTIVE_RUN_ID
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+    events_path = run_dir / "events.jsonl"
+    if events_path.exists():
+        events_path.unlink()
     _ACTIVE_DIR = run_dir
     _ACTIVE_RUN_ID = run_id
-    return run_dir / "events.jsonl"
+    return events_path
 
 
 def active_run_id() -> Optional[str]:
