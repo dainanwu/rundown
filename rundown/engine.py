@@ -15,9 +15,9 @@ Phase 2 会加:
   - FrozenStrategy:   载入预训练权重, 可选部分解冻.
 """
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Callable, Dict, Optional, Protocol
 
 import numpy as np
 import torch
@@ -66,6 +66,19 @@ class EngineConfig:
     # 时, manifest.env.code_snapshot.archive_path 应该是 "../_shared/code_xxx.zip"
     # 而不是 "code_xxx.zip" (因为 snapshot 不在 run_dir 里).
     snapshot_archive_rel: str = ""
+    # C2 — trainer 注入. 默认 "gradient" 走内置 GradientStrategy 路径,
+    # 行为与 C1 完全一致 (CLI 不传 --trainer 时落这条).
+    trainer_name: str = "gradient"
+    # trainer 配置 (CLI --trainer-config 注入, free-form dict).
+    # trainer 自己读这个字段; engine 不解析.
+    trainer_config: Dict[str, Any] = field(default_factory=dict)
+    # trainer 声明的 primary metric. session.start 会把它 (若 caller 未
+    # 已 set) 写进 manifest.config.primary_metric. 默认 best_val_mse.
+    primary_metric: str = "best_val_mse"
+    # 可选: 构造额外模型的回调. 多模型 trainer 通过 ``ctx.build_model(alias,
+    # variant=None, **kwargs)`` 拿到第二个模型, 不依赖全局状态. 内置
+    # gradient 不调用这条; CLI 仍会注入, 供自定义 trainer 使用.
+    build_model: Optional[Callable[..., Any]] = None
 
 
 class Strategy(Protocol):

@@ -55,6 +55,21 @@ class TestIds:
         assert is_valid("dataset_alias", "1bad") is False
         assert is_valid("model_id", "cnn_rul") is True
 
+    def test_valid_trainer_alias(self):
+        # C2 — trainer_alias 走与 dataset_alias / model_id 同款正则.
+        assert_valid("trainer_alias", "gradient")
+        assert_valid("trainer_alias", "joint_trainer")
+        assert_valid("trainer_alias", "a_b_c_2")
+        # 边界: 3 字符最短, 41 字符最宽
+        assert_valid("trainer_alias", "abc")
+        assert_valid("trainer_alias", "a" + "b" * 40)
+
+    def test_invalid_trainer_alias(self):
+        # 与 dataset_alias 一致: 空 / 数字开头 / 含 -  / 含空格 / 超长
+        for bad in ["", "1bad", "Has-Cap", "has space", "x" * 50, "ab", "a" * 42]:
+            with pytest.raises(ValueError):
+                assert_valid("trainer_alias", bad)
+
 
 # ---------------------------------------------------------------------------
 # events
@@ -235,15 +250,17 @@ class TestRegistry:
         assert isinstance(instance, ToyNet)
 
     def test_model_entry_no_optimizer_or_epochs_max(self):
-        """ModelEntry 字段只有 alias/factory_target/factory_kwargs/variants.
+        """ModelEntry 字段集 (C2 后): alias / factory_target / factory_kwargs /
+        variants / default_trainer.
 
         锁住「边界已重设计」: optimizer/epochs_max 不在 models, 防止以后误加回来.
+        C2 加 default_trainer 是有意的边界变更 (L4 风险已锁定, 见 plan §6).
         """
         from dataclasses import fields as dc_fields
         field_names = {f.name for f in dc_fields(ModelEntry)}
-        assert field_names == {"alias", "factory_target", "factory_kwargs", "variants"}, (
-            f"ModelEntry 字段变了: {field_names}"
-        )
+        assert field_names == {
+            "alias", "factory_target", "factory_kwargs", "variants", "default_trainer",
+        }, f"ModelEntry 字段变了: {field_names}"
 
     def test_defaults_optimizer_is_single_source(self):
         """DEFAULT_OPTIMIZER 是单点真值, 单次 train 的 fallback."""

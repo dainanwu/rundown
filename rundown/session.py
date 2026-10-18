@@ -58,6 +58,19 @@ class RunSession:
         # 这样 env.code_snapshot 物理落盘时机保持一致 (与现行实现对齐).
         self._captured_env: Optional[Dict[str, Any]] = None
 
+    @property
+    def finalized(self) -> bool:
+        """session 是否已 finalize. C2 给 CLI 用: trainer.fit() 返
+        回后检查 ``session.finalized``; 若 trainer 自己没调 finalize
+        (违反契约), 抛 RuntimeError, 让 CLI 报错而不是写一个看似成功
+        但 ``run_completed`` 缺失的 run_dir.
+
+        ``fail()`` 之后也是 no-finalize (L13) — 这时 ``finalized`` 仍
+        为 False, 但 ``_failed`` 为 True. 调用方通常用 ``session.finalized``
+        区分"成功 finalize" vs "没成功" 两种情况.
+        """
+        return self._finalized
+
     # ---- 公开 API ---------------------------------------------------------
 
     def start(self, run_info: Optional[Dict[str, Any]] = None) -> None:
@@ -65,6 +78,8 @@ class RunSession:
 
         顺序 (重要, 与现行实现对齐):
             1. 保存初始 manifest — 写盘即合同, 跑崩了也有空壳 manifest.
+               C2: setdefault trainer / primary_metric 到 manifest.config
+               (caller 已 set → 保留, 不覆盖). C1 测试依赖 preservation.
             2. set_active_log(run_dir, run_id) — 激活 events 流; 这一步会
                unlink 残留 events.jsonl, 让重激活 (中断重跑 / agent 重试)
                从干净流开始. 不依赖 caller 是否预先激活.
@@ -80,6 +95,13 @@ class RunSession:
 
         run_info = dict(run_info) if run_info else {}
         artifact = self.artifact
+
+        # 0) C2 — manifest.config 写 trainer / primary_metric. caller
+        #    在 start 前可能已经 (trainer 自己或 CLI 写完 train 字段再
+        #    调 start) → setdefault 不覆盖, 保留 caller 决定. C1 测试
+        #    不依赖这两个字段, 不破坏.
+        artifact.manifest.config.setdefault("trainer", self.trainer_name)
+        artifact.manifest.config.setdefault("primary_metric", self.primary_metric)
 
         # 1) 初始 manifest 落盘
         artifact.save_manifest()

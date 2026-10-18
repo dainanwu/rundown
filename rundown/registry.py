@@ -106,11 +106,14 @@ class ModelEntry:
     """一个模型 = PyTorch 类 + 默认 kwargs + 便捷 variants.
 
     设计边界 (跟 experiments.yaml 的区别):
-      - factory.target:   PyTorch 类引用 (必填)
-      - factory.kwargs:   固定结构 kwargs (数据集决定的, 如 in_dim)
-      - variants:         便捷预设 (同一模型不同 size 组合, --variant 用)
-      - ❌ optimizer:     不在 models — experiments 控制 (或 defaults.DEFAULT_OPTIMIZER)
-      - ❌ epochs_max:    不在 models — experiments 控制 (或 defaults.DEFAULT_EPOCHS_MAX)
+      - factory.target:    PyTorch 类引用 (必填)
+      - factory.kwargs:    固定结构 kwargs (数据集决定的, 如 in_dim)
+      - variants:          便捷预设 (同一模型不同 size 组合, --variant 用)
+      - default_trainer:   可选; alias 或 dotted path.
+                            CLI 不传 --trainer 时, 用这里声明的 trainer.
+                            None -> CLI 走内置 gradient.
+      - ❌ optimizer:      不在 models — experiments 控制 (或 defaults.DEFAULT_OPTIMIZER)
+      - ❌ epochs_max:     不在 models — experiments 控制 (或 defaults.DEFAULT_EPOCHS_MAX)
 
     --kwargs CLI 透传 (方案 C) 跟 variants 互补: variants 是预设, --kwargs 自由.
     """
@@ -118,6 +121,7 @@ class ModelEntry:
     factory_target: str
     factory_kwargs: Dict[str, Any]
     variants: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    default_trainer: Optional[str] = None
 
     def __post_init__(self) -> None:
         assert_valid("model_id", self.alias)
@@ -142,6 +146,28 @@ class ModelEntry:
                 f"model {self.alias!r}: factory.target must be a dotted path "
                 f"'module.attr' (e.g. 'myproj.models.Net'), got {self.factory_target!r}"
             )
+        # default_trainer 校验: None 允许; 否则要么是合法 alias, 要么是
+        # 'module.attr' dotted path. 这里不 import (跟 factory.target
+        # 行为不同, factory.target 立即 import 是 registry 的设计;
+        # default_trainer 留给 resolve_trainer 解决).
+        if self.default_trainer is not None:
+            if not isinstance(self.default_trainer, str) or not self.default_trainer:
+                raise ValueError(
+                    f"model {self.alias!r}: default_trainer must be str or None, "
+                    f"got {type(self.default_trainer).__name__}"
+                )
+            if "." in self.default_trainer:
+                # dotted path: module.attr (至少一个 dot + 非空 attr)
+                module_path, _, attr = self.default_trainer.rpartition(".")
+                if not module_path or not attr:
+                    raise ValueError(
+                        f"model {self.alias!r}: default_trainer must be "
+                        f"'module.attr' (dotted path) or a valid alias, "
+                        f"got {self.default_trainer!r}"
+                    )
+            else:
+                # alias: 走 ids.assert_valid (alias 正则)
+                assert_valid("trainer_alias", self.default_trainer)
 
     def build(
         self,
@@ -242,6 +268,7 @@ def load_models(configs_dir: Path = Path("configs")) -> Dict[str, ModelEntry]:
             factory_target=str(fac["target"]),
             factory_kwargs=fac.get("kwargs", {}) or {},
             variants=body.get("variants", {}) or {},
+            default_trainer=body.get("default_trainer"),
         )
     return out
 

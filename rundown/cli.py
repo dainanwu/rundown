@@ -66,6 +66,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "可多次. 合并顺序: factory_kwargs < variants < --kwargs (后者覆盖). "
                          "optuna sweep 时绕过 variants 限制, 自由传任意超参. "
                          "key 不在 factory 签名时由 factory 抛 TypeError (不静默).")
+    tp.add_argument("--trainer", default=None,
+                    help="trainer 选择: alias (e.g. 'gradient') 或 dotted path "
+                         "(e.g. 'myproj.trainers.JointTrainer'). 不传 → model 的 "
+                         "default_trainer (models.yaml), 仍无 → 内置 'gradient'.")
+    tp.add_argument("--trainer-config", default=None,
+                    help="trainer 配置 (JSON 字符串或 YAML/JSON 文件路径). "
+                         "以 '{' 开头 → JSON 字符串; 否则视为文件路径 "
+                         "(.json → json, 其它 → yaml). "
+                         "必须 JSON 可序列化 (启动前校验).")
 
     ep = sub.add_parser("experiment", parents=[quiet],
                         help="跑一个注册过的实验 (当前仅支持笛卡尔积 sweep)")
@@ -232,17 +241,96 @@ def _coerce_scalar(s: str) -> Any:
     return s
 
 
-def _cmd_train(args: argparse.Namespace) -> int:
-    """End-to-end: registry -> provider -> model -> engine -> artifact.
+def _parse_trainer_config(raw: Optional[str]) -> Dict[str, Any]:
+    """解析 ``--trainer-config`` 形参 -> dict.
 
-    通过 configs/{datasets,models}.yaml 的注册项, 反射出 BatchProvider 和
-    model. 所有超参走 CLI 覆盖 (--epochs-max / --steps-per-epoch / --batch-size / --lr).
+    规则 (与 L15 锁定):
+        * ``None`` / ``""`` -> ``{}`` (没传).
+        * 以 ``{`` 开头 -> ``json.loads``.
+        * 否则视为文件路径:
+            - ``.json`` 后缀 -> ``json.load``.
+            - 其它后缀 -> ``yaml.safe_load``.
+        * 任何路径必须存在; 否则 ``ValueError``.
+        * 解析结果必须是非空 dict (顶层); 否则 ``ValueError``.
+        * 必须 JSON 可序列化 (``json.dumps`` 校验, 防止 subprocess 透传时
+          翻车); 失败 ``ValueError``.
+
+    全部错误以 ValueError 抛出 (CLI 捕获后 _err 返回 2).
+    """
+    if raw is None or raw == "":
+        return {}
+
+    text = raw.strip()
+    if not text:
+        return {}
+
+    import json as _json
+    if text.startswith("{"):
+        try:
+            data = _json.loads(text)
+        except _json.JSONDecodeError as e:
+            raise ValueError(f"--trainer-config JSON 解析失败: {e}") from e
+    else:
+        # 文件路径
+        from pathlib import Path as _P
+        path = _P(text)
+        if not path.exists():
+            raise ValueError(
+                f"--trainer-config 文件不存在: {text!r} "
+                f"(若要传 JSON 字符串, 以 '{{' 开头)"
+            )
+        suffix = path.suffix.lower()
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as e:
+            raise ValueError(f"--trainer-config 读文件失败 {text!r}: {e}") from e
+        if suffix == ".json":
+            try:
+                data = _json.loads(content)
+            except _json.JSONDecodeError as e:
+                raise ValueError(f"--trainer-config {text!r} JSON 解析失败: {e}") from e
+        else:
+            import yaml as _yaml
+            try:
+                data = _yaml.safe_load(content)
+            except _yaml.YAMLError as e:
+                raise ValueError(f"--trainer-config {text!r} YAML 解析失败: {e}") from e
+            # 空文件 -> None
+            if data is None:
+                data = {}
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"--trainer-config 必须是 dict, got {type(data).__name__}: {data!r}"
+        )
+
+    # JSON 可序列化校验 (L15)
+    try:
+        _json.dumps(data)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"--trainer-config 必须是 JSON 可序列化, got: {data!r} ({e})"
+        ) from e
+
+    return data
+
+
+def _cmd_train(args: argparse.Namespace) -> int:
+    """End-to-end: registry -> provider -> model -> trainer -> session -> artifact.
+
+    C2: trainer 走 ``rundown.trainers.resolve_trainer`` 解析; 默认
+    ``gradient`` 走内置 GradientStrategy, 行为与 C1 完全一致 (RNG /
+    manifest 字段 / 产物文件均不漂移). 自定义 trainer (dotted path
+    或 alias) 走 ``Trainer.fit()`` -> ``session.finalize()``.
+
+    所有超参走 CLI 覆盖 (--epochs-max / --steps-per-epoch / --batch-size / --lr).
     """
     from .registry import load_datasets, load_models
     from .ids import assert_valid, is_valid
     from .artifact import RunManifest, RunArtifact
-    from .engine import EngineConfig, GradientStrategy
-    from .events import set_active_log, clear_active_log
+    from .engine import EngineConfig
+    from .session import RunSession
+    from .trainers import resolve_trainer
     import time as _time
 
     assert_valid("dataset_alias", args.dataset)
@@ -257,6 +345,20 @@ def _cmd_train(args: argparse.Namespace) -> int:
 
     dataset = datasets[args.dataset]
     model_entry = models[args.model]
+
+    # ---- Trainer 解析 (C2) ----
+    # 优先级: CLI --trainer > model.default_trainer > 内置 "gradient".
+    trainer_arg = args.trainer or model_entry.default_trainer or "gradient"
+    try:
+        trainer, canonical_trainer_name = resolve_trainer(trainer_arg)
+    except ValueError as e:
+        return _err(f"trainer {trainer_arg!r}: {e}")
+
+    # trainer_config (JSON / YAML / 文件)
+    try:
+        trainer_config = _parse_trainer_config(args.trainer_config)
+    except ValueError as e:
+        return _err(f"--trainer-config: {e}")
 
     # Run id 加上 variant 后缀, 避免同一 alias 多次跑冲突
     variant_suffix = f"__var{args.variant}" if args.variant else ""
@@ -326,9 +428,15 @@ def _cmd_train(args: argparse.Namespace) -> int:
     train_p = providers["train"]; val_p = providers["val"]; test_p = providers["test"]
     print(f"  config  : epochs={epochs_max} steps_per_epoch={steps_per_epoch} "
           f"batch_size={train_p.batch_size} lr={lr}")
+    print(f"  trainer : {canonical_trainer_name}  primary_metric={trainer.primary_metric}")
     print(f"  run dir : {out_dir}")
 
     # ----- Run manifest -----
+    # C2 写 trainer / trainer_config / trainer_contract 到 manifest.config.
+    # session.start 还会 setdefault trainer / primary_metric; 我们先写,
+    # session 用 setdefault 保留 caller 决定. 同时 trainer_config 和
+    # trainer_contract 在 session.start 后还会被写一次 (保持顺序一致,
+    # 在 start 前我们写更直观).
     manifest = RunManifest(
         run_id=run_id,
         created_at=_utc_now_iso(),
@@ -351,49 +459,110 @@ def _cmd_train(args: argparse.Namespace) -> int:
             "steps_per_epoch": int(steps_per_epoch),
             "optimizer": optimizer,
             "lr": lr,
+            "trainer": canonical_trainer_name,
+            "trainer_config": trainer_config,
+            "trainer_contract": list(trainer.required_provider_keys),
+            "primary_metric": trainer.primary_metric,
         },
     )
     artifact = RunArtifact(run_dir=out_dir, manifest=manifest)
-    artifact.save_manifest()
 
-    # ----- Train -----
-    set_active_log(out_dir, run_id)
+    # ----- Train (C2: trainer 驱动; session 拥有生命周期) -----
     t0 = _time.time()
+
+    def _build_model(alias: str, variant: Optional[str] = None, **kwargs: Any) -> Any:
+        """EngineConfig.build_model 回调: 给多模型 trainer 拿额外模型.
+
+        默认 train 走内置 gradient trainer, 不调这条. 自定义 trainer (例:
+        joint) 可通过 ``ctx.build_model(alias, variant=..., **kwargs)`` 拿到
+        第二个模型, 不依赖全局状态.
+        """
+        if alias not in models:
+            raise ValueError(
+                f"build_model: alias {alias!r} not registered; "
+                f"have: {sorted(models)}"
+            )
+        m, _, _ = models[alias].build(variant=variant, extra_kwargs=kwargs or None)
+        return m
+
+    ctx = EngineConfig(
+        run_id=run_id, seed=int(args.seed), epochs_max=int(epochs_max),
+        batch_size=train_p.batch_size,
+        steps_per_epoch=int(steps_per_epoch),
+        lr=float(lr),
+        snapshot=args.snapshot,
+        external_snapshot=_load_external_snapshot(args.snapshot_from_pool, out_dir),
+        snapshot_target_dir=snapshot_target_dir,
+        snapshot_archive_rel=snapshot_archive_rel,
+        trainer_name=canonical_trainer_name,
+        trainer_config=trainer_config,
+        primary_metric=trainer.primary_metric,
+        build_model=_build_model,
+    )
+
+    session = RunSession(
+        artifact=artifact, ctx=ctx,
+        trainer_name=canonical_trainer_name,
+        primary_metric=trainer.primary_metric,
+    )
+
+    n_params = sum(p.numel() for p in model.parameters())
+    run_info = {
+        "dataset":   dataset.alias,
+        "model":     model_entry.alias,
+        "variant":   chosen_variant,
+        "params":    n_params,
+        "epochs_max": int(epochs_max),
+        "steps_per_epoch": int(steps_per_epoch),
+        "lr":        float(lr),
+        "seed":      int(args.seed),
+    }
+    session.start(run_info=run_info)
+
     try:
-        ctx = EngineConfig(
-            run_id=run_id, seed=int(args.seed), epochs_max=int(epochs_max),
-            batch_size=train_p.batch_size,
-            steps_per_epoch=int(steps_per_epoch),
-            lr=float(lr),
-            snapshot=args.snapshot,
-            external_snapshot=_load_external_snapshot(args.snapshot_from_pool, out_dir),
-            snapshot_target_dir=snapshot_target_dir,
-            snapshot_archive_rel=snapshot_archive_rel,
+        trainer.validate(providers)
+        result = trainer.fit(
+            model=model, providers=providers, ctx=ctx, session=session,
         )
-        result = GradientStrategy().fit(
-            model, train_data=train_p, val_data=val_p, test_data=test_p,
-            ctx=ctx, artifact=artifact,
-        )
-        dt = _time.time() - t0
+        if not session.finalized:
+            # 契约违反: trainer 应当自己调 session.finalize(...). 没调就给
+            # 明确错误, 不写一个看似成功但 run_completed 缺失的 run_dir.
+            raise RuntimeError(
+                f"trainer {canonical_trainer_name!r}.fit() returned without "
+                f"finalizing RunSession; check Trainer protocol docs."
+            )
+    except Exception as exc:
+        session.fail(exc)
+        # 重新抛出, 走 CLI 的硬错误路径; session 已清掉 events 流.
+        raise
 
-        # ----- 收尾打印 -----
-        primary = artifact.manifest.config.get("predictions_primary", "test_best")
-        if primary in artifact.predictions:
-            pred = artifact.predictions[primary]
-            test_mse = float(((pred["y_hat"] - pred["y_true"]) ** 2).mean())
-            test_mse_str = f"  test_mse({primary})={test_mse:.4f}"
-        else:
-            test_mse_str = ""
+    dt = _time.time() - t0
 
-        print()
-        print(f"[done] {run_id}  "
-              f"epochs={result['epochs_actual']}  "
-              f"best_val_mse={result['best_val']:.4f}"
-              f"{test_mse_str}  duration={dt:.1f}s")
-        print(f"  artifacts: {out_dir}")
-        return 0
-    finally:
-        clear_active_log()
+    # ----- 收尾打印 -----
+    primary = artifact.manifest.config.get("predictions_primary", "test_best")
+    if primary in artifact.predictions:
+        pred = artifact.predictions[primary]
+        test_mse = float(((pred["y_hat"] - pred["y_true"]) ** 2).mean())
+        test_mse_str = f"  test_mse({primary})={test_mse:.4f}"
+    else:
+        test_mse_str = ""
+
+    # result.metrics 是 trainer 返回的 dict (e.g. {"best_val_mse": ..,
+    # "epochs_to_best": .., "epochs_actual": ..}). best_val 优先从 metrics
+    # 取 trainer.primary_metric; epochs 优先 result.epochs_actual, fallback
+    # metrics["epochs_actual"].
+    metrics = result.metrics
+    primary_value = metrics.get(trainer.primary_metric)
+    primary_str = f"{primary_value:.4f}" if isinstance(primary_value, (int, float)) else "-"
+    epochs_actual = result.epochs_actual or metrics.get("epochs_actual")
+
+    print()
+    print(f"[done] {run_id}  "
+          f"epochs={epochs_actual}  "
+          f"{trainer.primary_metric}={primary_str}"
+          f"{test_mse_str}  duration={dt:.1f}s")
+    print(f"  artifacts: {out_dir}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
