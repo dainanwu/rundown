@@ -6,6 +6,9 @@
 #   variants         可选; variant_name -> kwargs override.
 #                    便捷预设 — 同一模型不同 size 组合, CLI --variant <name> 用.
 #                      e.g. variants: {small: {hidden: 32}, large: {hidden: 128}}
+#   default_trainer  可选 (C2 起); trainer alias (e.g. "gradient") 或
+#                    dotted path (e.g. "myproj.trainers.JointTrainer").
+#                    不传 → CLI 默认走内置 "gradient".
 #
 # 不在 models.yaml 的字段 (边界明确):
 #   ❌ optimizer  — 默认训练配置在 defaults.DEFAULT_OPTIMIZER; sweep 时由
@@ -13,6 +16,8 @@
 #   ❌ epochs_max — 训练时长不在 models (不是模型属性); sweep 时由
 #                    experiments.yaml.epochs_max 决定, 单次 train 用 defaults.
 #   ❌ dataset    — 数据集归属 experiments, 不归 models.
+#   ❌ trainer_config — 训练配置不属于模型; 走 experiments.yaml.trainer_config
+#                       或 CLI --trainer-config.
 #
 # 自由透传: rundown train --model X --kwargs hidden=128 --kwargs lr=0.0005
 #   (绕过 variants 限制, optuna sweep 用 — 见方案 C)

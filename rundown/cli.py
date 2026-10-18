@@ -82,6 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
     erun = exp_p.add_parser("run", parents=[quiet], help="跑实验")
     erun.add_argument("name", help="experiments.yaml 里的实验名")
     erun.add_argument("--out-root", type=Path, default=None)
+    erun.add_argument("--trainer", default=None,
+                      help="override experiments.yaml.trainer (alias 或 dotted path). "
+                           "不传 → 走 experiments.yaml 里的值, 仍无 → 由 trial "
+                           "端按 model.default_trainer → 内置 gradient 解析.")
 
     rp = sub.add_parser("read-run", parents=[quiet], help="读一个 run 算新指标")
     rp.add_argument("run_id")
@@ -657,7 +661,12 @@ def _cmd_read_run(args: argparse.Namespace) -> int:
 # experiment (Phase C)
 # ---------------------------------------------------------------------------
 def _cmd_experiment_run(args: argparse.Namespace) -> int:
-    """rundown experiment run <name> — 跑一个注册的 sweep."""
+    """rundown experiment run <name> — 跑一个注册的 sweep.
+
+    C3 加 ``--trainer`` override: CLI 传 trainer 时, 覆盖 experiments.yaml 里
+    的同名字段 (用于临时换 trainer 跑同组 sweep; trainer_config / metric 仍走
+    YAML, 因为它们语义上属于 sweep 设计).
+    """
     from .registry import load_experiments
     from .experiment import run_experiment as _run
 
@@ -665,6 +674,8 @@ def _cmd_experiment_run(args: argparse.Namespace) -> int:
     if args.name not in experiments:
         return _err(f"experiment {args.name!r} not registered; have: {sorted(experiments)}")
     exp = experiments[args.name]
+    if args.trainer:
+        exp.trainer = args.trainer
     out_root = args.out_root or Path("artifacts")
     try:
         _run(exp, out_root=out_root)

@@ -16,6 +16,21 @@
 #                    例: {kind: adam, lr: 0.0005} (sweep 用更低 lr 探索)
 #                    sweep 内通过 subprocess CLI 透传给每个 trial.
 #
+# 可选 trainer 字段 (C3 起生效):
+#   trainer          trainer 名称 (alias 或 dotted path).
+#                      alias:    configs/trainers.yaml 注册过, 或内置 "gradient".
+#                      dotted:   "myproj.trainers.JointTrainer".
+#                    sweep 内给 subprocess 加 ``--trainer <value>``;
+#                    trial 端按 CLI 解析优先级 (CLI > experiments.yaml >
+#                    model.default_trainer > "gradient") 决定最终 trainer.
+#   trainer_config   dict, 给 subprocess 加 ``--trainer-config <json>``.
+#                    启动前 JSON 校验 (L15); 非 JSON 可序列化 → ValueError.
+#                    例: {alpha: 0.5, stages: [warmup, finetune]}
+#   metric           sweep 汇总指标名 (例如 "best_val_mse", "best_val_loss",
+#                    或 trainer 自定义的 primary_metric).
+#                    优先级: exp.metric > trial.manifest.config.primary_metric
+#                    > "best_val_mse".
+#
 # 不在 experiments 的字段:
 #   ❌ factory.target / factory.kwargs — 这些在 models.yaml
 #   ❌ hidden / num_layers 等 — models.variants 是预设, --kwargs 是自由透传
@@ -30,3 +45,10 @@ experiments:
     optimizer: {kind: adam, lr: 0.001}     # 可选, 不写走 defaults.DEFAULT_OPTIMIZER
     variants: [small, large, deep]
     # 3 trials; run_id 格式: lstm__var{small|large|deep}__etth1__seed{0,1,2}
+    #
+    # C3 字段示例 (注释掉, 不影响当前 sweep):
+    #   trainer: myproj.trainers.JointTrainer     # dotted path
+    #   trainer_config:                            # 透传给 trainer.fit()
+    #     alpha: 0.5
+    #     stages: [warmup, finetune]
+    #   metric: best_val_mse                       # sweep 汇总用这个 metric

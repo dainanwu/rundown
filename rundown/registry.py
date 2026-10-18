@@ -273,10 +273,52 @@ def load_models(configs_dir: Path = Path("configs")) -> Dict[str, ModelEntry]:
     return out
 
 
+def _validate_experiment_trainer(name: str, value: Any) -> None:
+    """校验 experiments.yaml.trainer 字段.
+
+    规则 (与 ModelEntry.default_trainer 一致):
+      * 必须是非空 str.
+      * 含 ``.``  → 视为 dotted path; module / attr 都非空.
+      * 不含 ``.`` → 视为 alias; 走 ``ids.assert_valid("trainer_alias", ...)``.
+
+    真正的 import 由 ``rundown.trainers.resolve_trainer`` 在 subprocess
+    内做; registry 只校验 shape (跟 factory.target 立即 import 行为不同 —
+    factory.target 反映的是模型类, 必须能 import; trainer 是 sweep 编排,
+    写配置的人不一定能在 load 时 import 用户自定义 trainer).
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            f"experiment {name!r}: 'trainer' must be non-empty str, "
+            f"got {type(value).__name__}: {value!r}"
+        )
+    if "." in value:
+        module_path, _, attr = value.rpartition(".")
+        if not module_path or not attr:
+            raise ValueError(
+                f"experiment {name!r}: 'trainer' must be 'module.attr' "
+                f"(dotted path) or a valid alias, got {value!r}"
+            )
+    else:
+        # alias 走 ids.assert_valid (trainer_alias 正则)
+        try:
+            assert_valid("trainer_alias", value)
+        except ValueError as e:
+            raise ValueError(
+                f"experiment {name!r}: 'trainer' alias invalid: {e}"
+            ) from e
+
+
 def load_experiments(configs_dir: Path = Path("configs")) -> Dict[str, "Experiment"]:
     """加载 configs/experiments.yaml. 返回 name -> Experiment 字典.
 
     Experiment 在 rundown.experiment 里定义; 延迟导入避免循环.
+
+    C3 新字段 (YAML 可选):
+      * trainer          alias 或 dotted path; ``run_experiment`` 透传
+                          ``--trainer`` 给 subprocess.
+      * trainer_config   dict; ``run_experiment`` 序列化后透传 ``--trainer-config``
+                          (启动前 JSON 校验, L15).
+      * metric          sweep 汇总指标名; 优先于 manifest.config.primary_metric.
     """
     from .experiment import Experiment  # local import to avoid circular
     path = Path(configs_dir) / "experiments.yaml"
@@ -318,6 +360,28 @@ def load_experiments(configs_dir: Path = Path("configs")) -> Dict[str, "Experime
                 opt_raw = dict(opt_raw)
                 opt_raw["lr"] = lr_v  # 强制 float, 防 yaml 写成 "1e-3" 留字符串
             opt = opt_raw
+        # C3 — trainer / trainer_config / metric. 不写时全 None, 行为不变.
+        trainer = body.get("trainer")
+        if trainer is not None:
+            _validate_experiment_trainer(name, trainer)
+            trainer = str(trainer)
+
+        trainer_config = body.get("trainer_config")
+        if trainer_config is not None and not isinstance(trainer_config, dict):
+            raise ValueError(
+                f"experiment {name!r}: 'trainer_config' must be a mapping, "
+                f"got {type(trainer_config).__name__}"
+            )
+
+        metric = body.get("metric")
+        if metric is not None:
+            if not isinstance(metric, str) or not metric:
+                raise ValueError(
+                    f"experiment {name!r}: 'metric' must be non-empty str, "
+                    f"got {type(metric).__name__}: {metric!r}"
+                )
+            metric = str(metric)
+
         out[name] = Experiment(
             name=name,
             dataset=str(body["dataset"]),
@@ -327,6 +391,9 @@ def load_experiments(configs_dir: Path = Path("configs")) -> Dict[str, "Experime
             steps_per_epoch=int(body.get("steps_per_epoch", 50)),
             batch_size=(int(body["batch_size"]) if body.get("batch_size") is not None else None),
             optimizer=opt,
+            trainer=trainer,
+            trainer_config=trainer_config,
+            metric=metric,
         )
     return out
 

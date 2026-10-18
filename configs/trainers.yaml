@@ -1,0 +1,25 @@
+# rundown 可选 trainer 别名注册表 (C2 起生效).
+#
+# trainer 选择规则:
+#   1. 内置 ``gradient`` 永远可用, 不可被这里覆盖 (L16).
+#   2. 直接写 dotted path (e.g. ``myproj.trainers.JointTrainer``) 不用注册.
+#   3. 想用短名 (alias) 才需要在这里登记.
+#
+# alias 必须满足 ``^[a-z][a-z0-9_]{2,40}$`` (跟 dataset_alias / model_id
+# 同款正则, 详见 rundown/ids.py).
+#
+# target 必须是 ``module.attr`` (dotted path); 实际 import 在 ``resolve_trainer``
+# 里完成, 失败抛 ValueError. 这里只校验 shape.
+#
+# 注意: custom trainer 代码必须可 import. 走 CLI ``python -m rundown.cli``
+# 时 cwd 在 sys.path; 直接 console script 需装包或设 PYTHONPATH (L11).
+# 代码快照只含 tracked 文件 — trainer 代码要提交 (L12).
+
+trainers: {}
+
+# 示例 (注释掉, 不影响当前 sweep):
+# trainers:
+#   joint:
+#     target: myproj.trainers.JointTrainer
+#   staged:
+#     target: myproj.trainers.StagedTrainer
