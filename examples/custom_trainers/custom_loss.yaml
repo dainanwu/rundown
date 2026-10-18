@@ -1,0 +1,18 @@
+# CustomLossTrainer 配置示例.
+#
+# 字段:
+#   huber_delta   float — HuberLoss 的 delta. 越大越接近 MSE; 越小越接近 L1.
+#                默认 1.0.
+#   l1_weight     float — |yhat|.mean() 的权重. 控制模型预测的「保守程度」.
+#                默认 0.001 (小幅度, 防止压垮主 loss).
+#   lr            float — 可选; 覆盖 defaults.DEFAULT_LR. 不传 → 走 --lr / 默认.
+
+huber_delta: 1.0
+l1_weight: 0.001
+# lr: 0.001
+
+# 调用:
+# uv run python -m rundown.cli train --dataset etth1 --model lstm \
+#     --trainer examples.custom_trainers.custom_loss.CustomLossTrainer \
+#     --trainer-config examples/custom_trainers/custom_loss.yaml \
+#     --epochs-max 1

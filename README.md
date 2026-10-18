@@ -552,6 +552,141 @@ uv run rundown train --dataset etth1 --model lstm --variant small --seed 0 \
 
 ---
 
+## 自定义 trainer (Custom trainers)
+
+rundown 的 4 层架构:
+
+```
+artifact.py        产物: manifest / weights / curves / predictions / events
+session.py         RunSession — 一次 run 的生命周期与统一收尾
+trainers.py        Trainer 协议 + 内置 GradientTrainer 适配器 + registry
+engine.py          保留: GradientStrategy (内置梯度训练)
+registry.py        YAML: dataset / model / experiment / trainer
+cli.py             CLI: train / experiment / list-runs / inspect …
+```
+
+第 1 层是「记录 / 不变量」(artifact 边界), 第 2 层是「训练语义」(loss / stage /
+多模型). `RunSession` 把第 1 层收口, `Trainer` 协议把第 2 层抽象. 默认 trainer
+(`gradient`) 写在 `engine.py`; 自定义 trainer 通过 `--trainer` / `--trainer-config`
+接入, **不必** 改 `engine.py`.
+
+### `Trainer` 协议
+
+```python
+from rundown.trainers import TrainResult  # 函数内 import
+
+class MyTrainer:
+    name = "my_trainer"
+    required_provider_keys = ("x", "y", "warm_start")
+    primary_metric = "best_val_mse"        # 实验汇总读这个
+
+    def validate(self, providers): ...     # 训练前契约校验; 默认 no-op
+    def fit(self, *, model, providers, ctx, session) -> TrainResult:
+        # 训练循环: 走 session.emit / session.checkpoint_best /
+        # session.write_curves / session.write_predictions / session.finalize.
+        # 永远不调 save_manifest / set_active_log / clear_active_log.
+        ...
+        session.finalize(
+            metrics={"best_val_mse": ..., "epochs_actual": ...},
+            predictions_primary="test_best",
+            epochs_actual=...,
+        )
+        return TrainResult(metrics=..., epochs_actual=..., ...)
+```
+
+### `RunSession` 职责
+
+- `start(run_info=...)` — 落初始 manifest, 激活 events, 捕获 env, emit `run_started`.
+- `emit(kind, **fields)` — 训练中事件 (epoch_completed / stage_started 等).
+- `checkpoint_best(state)` / `write_weights(state, best=False)` — 写 weights_best / weights.
+- `write_curves({"train_loss": tensor, "val_loss": tensor})` — 写 curves.safetensors.
+- `write_predictions("test_best", {...})` — 写 predictions/test_best.safetensors.
+- `finalize(metrics, ...)` — 写 manifest.metrics / env, emit `run_completed`, 幂等.
+- `fail(exc)` — 失败路径: emit `run_failed`, 不写 `run_completed`.
+
+`trainer` 自己**不必** import rundown 任何东西 (除 `from rundown.trainers import
+TrainResult` 这一个 import). session 是 trainer 与 artifact 之间的唯一桥梁.
+
+### 跑模板示例
+
+`examples/custom_trainers/` 给三个 runnable 模板 — 自定义 loss / 分阶段训练 /
+联合训练 (主模型 + 辅助模型). 任何一个都能直接跑:
+
+```bash
+uv run python -m rundown.cli train \
+    --dataset etth1 --model lstm \
+    --trainer examples.custom_trainers.custom_loss.CustomLossTrainer \
+    --trainer-config examples/custom_trainers/custom_loss.yaml \
+    --epochs-max 1
+```
+
+YAML 配置 (JSON 也行):
+
+```yaml
+# examples/custom_trainers/custom_loss.yaml
+huber_delta: 1.0        # HuberLoss 的 delta
+l1_weight: 0.001        # |yhat|.mean() 的权重, 鼓励预测趋近 0
+```
+
+Experiment sweep 透传:
+
+```yaml
+# configs/experiments.yaml
+experiments:
+  custom_loss_sweep:
+    dataset: etth1
+    model: lstm
+    epochs_max: 1
+    variants: [small]
+    trainer: examples.custom_trainers.custom_loss.CustomLossTrainer
+    trainer_config: {huber_delta: 0.5}
+    metric: best_val_loss    # 汇总用这个
+```
+
+`experiment run` 启动时把 `--trainer` / `--trainer-config` 传给 subprocess,
+subprocess 端按 `Trainer` 协议解析 → 跑 → 写产物.
+
+### 多模型权重前缀 (joint trainer 专属)
+
+`JointTrainer` 同时训主 + 辅两个模型, 写进同一个 `weights.safetensors` /
+`weights_best.safetensors`. key 加前缀防冲突:
+
+```
+main.<param>     主模型 (manifest.config.primary_metric 走它)
+aux.<param>      辅助模型
+```
+
+读回时按前缀拆:
+
+```python
+from safetensors.torch import load_file
+state = load_file("artifacts/.../weights_best.safetensors")
+main_only = {k[len("main."):]: v
+             for k, v in state.items() if k.startswith("main.")}
+model.load_state_dict(main_only)
+```
+
+约定见 `examples/custom_trainers/joint.py` 和 `examples/custom_trainers/README.md`.
+
+### Caveats — 上手前请读
+
+1. **`python -m rundown.cli` 模式** vs **`rundown` console script**.
+   - `python -m rundown.cli` 把 cwd 加到 `sys.path`, `examples.custom_trainers.X`
+     直接 import 即可.
+   - 全局装的 `rundown` 命令没把项目根加 `sys.path`, 需要 `pip install -e .`
+     或 `PYTHONPATH=.`.
+2. **代码快照只含 tracked files**. trainer.py 必须提交进 git, 否则 snapshot
+   抓不到, 1 年后用 `_shared/code_xxx` 还原不出来.
+3. **trainer.py 不许 import rundown** (除 `rundown.trainers.TrainResult`).
+   trainer / 模型都不知道 rundown 存在 — rundown 来找它们, 不是反过来.
+
+`inspect_run` 自动读 `manifest.config.trainer` 在 Setup 段显示 `- **Trainer**:
+\`custom_loss\`` 一行; 通用 metrics / curves 表让任意 `stage1_train_loss` /
+`val_loss` / `aux_train_loss` 都被渲染, 不破坏旧 artifact 的输出. 详见
+[`examples/custom_trainers/README.md`](examples/custom_trainers/README.md).
+
+---
+
 ## 目录布局约定
 
 跑 ML 实验的项目根目录有 4 类互不重叠的子目录. 区分的维度是 **生命周期** (长期 vs 临时), 不是 **作者** (Agent vs 人):

@@ -67,6 +67,9 @@ class RunIntel:
     event_kinds: Dict[str, int] = field(default_factory=dict)
     code_snapshot: Optional[Dict[str, Any]] = None  # resolved from _shared
     artifacts_on_disk: List[Tuple[str, int]] = field(default_factory=list)  # (relpath, bytes)
+    # C4 — generic curve series (train_loss / val_loss / val_mse / stage1_… etc).
+    # 放在 dataclass 末尾以保持旧 positional 构造兼容; populated by ``load_run``.
+    curves: Dict[str, List[float]] = field(default_factory=dict)
 
     @property
     def created_at(self) -> Optional[str]:
@@ -78,6 +81,16 @@ class RunIntel:
         env = self.manifest.get("env") or {}
         v = env.get("git_commit")
         return v[:SHA8] if isinstance(v, str) else None
+
+    @property
+    def trainer_name(self) -> Optional[str]:
+        """C4: 读 manifest.config.trainer (CLI/trainer 注册表写入).
+
+        不存在 → None; 渲染时 Setup 段才决定是否展示 ``- **Trainer**: …`` 一行.
+        """
+        cfg = self.manifest.get("config") or {}
+        v = cfg.get("trainer")
+        return v if isinstance(v, str) and v else None
 
 
 # ============================================================================
@@ -120,6 +133,48 @@ def _load_curves(run_dir: Path) -> List[EpochPoint]:
         )
         for i in range(len(train))
     ]
+
+
+def _load_curve_series(run_dir: Path) -> Dict[str, List[float]]:
+    """C4: 读 ``curves.safetensors`` 里所有 1-D numeric series.
+
+    与 ``_load_curves`` 互补: 后者只看 ``train_loss`` / ``val_mse`` 两个键,
+    返回 ``List[EpochPoint]``; 这一个把全部键都以 ``{name: [float, ...]}``
+    形式返回, 给通用表格 (custom trainers 写 ``stage1_train_loss`` /
+    ``stage2_train_loss`` / ``val_loss`` / ``main_train_loss`` 等任意名都直接渲染).
+
+    读取策略:
+      * ``safe_open`` 不可用 → ``{}``.
+      * 文件不存在 / 读失败 → ``{}``.
+      * 每个键:
+          - 1-D ``tensor`` (n,)         → 取 ``.tolist()`` 转 ``List[float]``.
+          - 0-D ``tensor`` (标量)        → 包成 ``[float]`` (1 元素 list).
+          - 其它 shape / dtype           → 跳过 (不污染通用表).
+    """
+    path = run_dir / "curves.safetensors"
+    if safe_open is None or not path.exists():
+        return {}
+    try:
+        with safe_open(str(path), framework="numpy") as f:
+            keys = list(f.keys())
+            series: Dict[str, List[float]] = {}
+            for k in keys:
+                try:
+                    arr = f.get_tensor(k)
+                except (OSError, ValueError):
+                    continue
+                # Skip non-numeric dtypes (rare; safetensors numpy backend
+                # 默认就是 float32, 这里守底).
+                if arr.dtype.kind not in ("f", "i", "u"):
+                    continue
+                if arr.ndim == 0:
+                    series[k] = [float(arr.reshape(()))]
+                elif arr.ndim == 1:
+                    series[k] = [float(v) for v in arr.tolist()]
+                # else: skip — 不强行重塑, 让 manifest 字段自负
+    except (OSError, ValueError):
+        return {}
+    return series
 
 
 def _load_predictions_sample(run_dir: Path) -> Optional[SamplePrediction]:
@@ -237,6 +292,7 @@ def load_run(run_id_or_dir: Any, *, root: Path = Path("artifacts")) -> RunIntel:
         run_dir=run_dir,
         manifest=manifest,
         curves_epochs=_load_curves(run_dir),
+        curves=_load_curve_series(run_dir),
         predictions_sample=_load_predictions_sample(run_dir),
         event_kinds=_event_kinds(run_dir),
         code_snapshot=_resolve_code_snapshot(manifest, root),
@@ -432,6 +488,11 @@ def render_run_markdown(run: RunIntel) -> str:
         f"optimizer={opt_str}",
         f"- **Seed**: {m.get('seed', '?')}",
     ]
+    # C4: trainer 字段 (CLI / experiment YAML / model.default_trainer 任意一处).
+    # 仅当 manifest.config.trainer 非空时显示, 避免 C3 前的旧 artifact 加空行.
+    trainer_name = run.trainer_name
+    if trainer_name:
+        setup_lines.append(f"- **Trainer**: `{trainer_name}`")
 
     # ---- Environment ----
     git_short = run.git_commit or "?"
@@ -462,19 +523,27 @@ def render_run_markdown(run: RunIntel) -> str:
         )
 
     # ---- Results ----
+    # C4: 通用 metrics 表 — 所有 manifest.metrics 键都列出来.
+    # 已知键 (best_val_mse / best_val_loss / epochs_to_best / epochs_actual /
+    # val_mse_final) 按固定顺序在最前, 其余按字母升序. 旧 artifact 仍是这套
+    # 顺序, 视觉上对齐 README 样例的表格.
     results_lines = [
         "| metric | value |",
         "| --- | --- |",
     ]
-    if metrics.get("best_val_mse") is not None:
-        results_lines.append(f"| best_val_mse | {_f(metrics.get('best_val_mse'))} |")
-    if metrics.get("epochs_to_best") is not None:
-        results_lines.append(f"| epochs_to_best | {metrics.get('epochs_to_best')} |")
-    if metrics.get("epochs_actual") is not None:
-        results_lines.append(f"| epochs_actual | {metrics.get('epochs_actual')} |")
-    if metrics.get("val_mse_final") is not None:
-        results_lines.append(f"| val_mse_final | {_f(metrics.get('val_mse_final'))} |")
-    if len(results_lines) == 2:
+    if metrics:
+        known_priority = ("best_val_mse", "best_val_loss", "epochs_to_best",
+                          "epochs_actual", "val_mse_final")
+        seen = []
+        for k in known_priority:
+            if k in metrics:
+                results_lines.append(f"| {k} | {_f(metrics[k])} |")
+                seen.append(k)
+        for k in sorted(metrics.keys()):
+            if k in seen:
+                continue
+            results_lines.append(f"| {k} | {_f(metrics[k])} |")
+    else:
         results_lines.append("| (no metrics) | - |")
 
     curves_section = ""
@@ -489,6 +558,37 @@ def render_run_markdown(run: RunIntel) -> str:
                 f"| {p.epoch} | {_f(p.train_loss)} | {_f(p.val_mse)} | {star} |"
             )
         curves_section = "### Loss curves\n\n" + "\n".join(rows)
+    elif run.curves:
+        # C4: 通用曲线表. 旧 ``train_loss`` / ``val_mse`` 仍能用 — 已映射成
+        # ``curves_epochs`` 走 legacy 表, 这里只为 custom trainer (e.g. joint /
+        # staged / custom_loss) 的任意 ``val_loss`` / ``stage1_train_loss`` 等
+        # 走通用路径.
+        #
+        # 渲染规则:
+        #   * 1 列: ``epoch`` (索引, 1-based, 兼容旧格式).
+        #   * N 列: series 名 (按字母排序, deterministic).
+        #   * 列数 cap 到 8 + 1 ellipsis note (防止几十列 metrics 撑爆表格).
+        #   * 缺失位置填 ``-``.
+        series_names = sorted(run.curves.keys())
+        cap = 8
+        truncated = len(series_names) > cap
+        shown = series_names[:cap]
+        max_len = max((len(v) for v in run.curves.values()), default=0)
+        header_cells = ["epoch"] + shown
+        rows = ["| " + " | ".join(header_cells) + " |",
+                "| " + " | ".join("---" for _ in header_cells) + " |"]
+        for i in range(max_len):
+            cells = [str(i + 1)]
+            for name in shown:
+                series = run.curves.get(name) or []
+                cells.append(_f(series[i]) if i < len(series) else "-")
+            rows.append("| " + " | ".join(cells) + " |")
+        curves_section = "### Curves\n\n" + "\n".join(rows)
+        if truncated:
+            curves_section += (
+                f"\n\n_… {len(series_names) - cap} more series not shown "
+                f"(cap={cap}; see `curves.safetensors`)._"
+            )
 
     sample_section = ""
     if run.predictions_sample:

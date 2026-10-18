@@ -7,6 +7,8 @@ What MUST hold:
   - Missing run -> FileNotFoundError
   - iter_recent_runs() --all listing respects filters
   - rundown inspect CLI exits 0 with non-empty stdout markdown
+  - C4: generic metrics / curves rendering, ``Trainer`` line, multi-model
+    curves all work without breaking legacy output.
 """
 from __future__ import annotations
 import json
@@ -14,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 # bootstrap: tests/ has no conftest, rely on root cwd (pytest already sets it)
 from rundown.inspect_run import (
@@ -332,3 +335,123 @@ class TestCliInspect:
         assert rc == 0
         out = capsys.readouterr().out
         assert out.count("# Run:") == 2
+
+
+# ============================================================================
+# C4 — generic metrics / curves rendering + Trainer line
+# ============================================================================
+
+class TestSyntheticCustomRun:
+    """Custom trainer 风格的 manifest (custom metric + 任意 curves + trainer 名)
+    渲染: trainer 行出现在 Setup, custom metric 出现在 Results, 通用曲线表
+    出现, legacy sections 仍在. 不依赖真 CLI / 真 trainer (写纯 synthetic
+    manifest).
+    """
+
+    def _write_custom_run(self, root: Path) -> Path:
+        """写一份 minimal synthetic custom-trainer run (best_val_loss +
+        任意 curves + config.trainer).
+        """
+        run_dir = root / "r__custom__s0"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "predictions").mkdir(exist_ok=True)
+
+        manifest = {
+            "run_id": "r__custom__s0",
+            "created_at": "2025-01-15T08:30:00",
+            "seed": 0,
+            "dataset": {
+                "alias": "toy",
+                "source": {"kind": "csv", "path": "data/toy.csv"},
+                "target_col": "y",
+                "splits": {"train": 0.6, "val": 0.2, "test": 0.2},
+            },
+            "model": {
+                "alias": "m",
+                "variant": None,
+                "factory": {"target": "myproj.X", "kwargs": {"in_dim": 4}},
+            },
+            "config": {
+                "epochs_max": 2,
+                "steps_per_epoch": 10,
+                "optimizer": {"kind": "adam", "lr": 0.001},
+                "lr": 0.001,
+                "trainer": "custom",
+                "trainer_config": {"huber_delta": 0.5},
+                "primary_metric": "best_val_loss",
+            },
+            "env": {
+                "rundown_version": "0.1.0",
+                "python": "3.10.21",
+                "platform": "Windows",
+                "hostname": "test-host",
+                "argv": ["cli.py", "train", "--dataset", "toy", "--model", "m"],
+                "cwd": str(root),
+                "torch": "2.0.0",
+                "numpy": "1.26",
+            },
+            "metrics": {
+                "best_val_loss": 0.25,
+                "custom_extra": 7,
+                "epochs_actual": 2,
+            },
+        }
+        (run_dir / "manifest.yaml").write_text(
+            yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        # curves: stage1_loss / stage2_loss (任意键名, 没有 train_loss / val_mse
+        # 触发 legacy table)
+        from safetensors.numpy import save_file
+        import numpy as np
+        save_file({
+            "stage1_loss": np.array([0.5, 0.4], dtype=np.float32),
+            "stage2_loss": np.array([0.3, 0.2], dtype=np.float32),
+        }, str(run_dir / "curves.safetensors"))
+        save_file({
+            "y_hat":  np.zeros((4, 5), dtype=np.float32),
+            "y_true": np.zeros((4, 5), dtype=np.float32),
+        }, str(run_dir / "predictions" / "test_best.safetensors"))
+
+        return run_dir
+
+    def test_render_includes_trainer_and_custom_metrics_and_curves(
+        self, tmp_path: Path,
+    ) -> None:
+        run_dir = self._write_custom_run(tmp_path)
+        run = load_run(run_dir)
+        md = render_run_markdown(run)
+
+        # legacy sections 都在
+        for must in (
+            "## Purpose", "## Setup", "## Environment",
+            "## Results", "## How to evaluate", "## Artifacts on disk",
+        ):
+            assert must in md, f"missing legacy section {must!r}"
+
+        # Trainer 行 (C4)
+        assert "**Trainer**" in md
+        assert "`custom`" in md
+
+        # custom metrics 出现在 Results 表
+        assert "best_val_loss" in md
+        assert "custom_extra" in md
+
+        # curves — 通用表 (没有 train_loss/val_mse 触发 legacy)
+        assert "stage1_loss" in md
+        assert "stage2_loss" in md
+
+    def test_curves_dict_loaded_for_custom_run(self, tmp_path: Path) -> None:
+        """RunIntel.curves 装载所有 1-D numeric series, 即使没有 train_loss/val_mse."""
+        run_dir = self._write_custom_run(tmp_path)
+        run = load_run(run_dir)
+        assert "stage1_loss" in run.curves
+        assert "stage2_loss" in run.curves
+        # float32 精度 (写 safetensors 经 numpy round-trip) — 用 approx
+        assert len(run.curves["stage1_loss"]) == 2
+        assert run.curves["stage1_loss"][0] == pytest.approx(0.5)
+        assert run.curves["stage1_loss"][1] == pytest.approx(0.4)
+        assert run.curves["stage2_loss"][0] == pytest.approx(0.3)
+        assert run.curves["stage2_loss"][1] == pytest.approx(0.2)
+        # curves_epochs 空 (没 train_loss/val_mse)
+        assert run.curves_epochs == []

@@ -113,6 +113,10 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--below-metric", nargs=2, default=None, metavar=("NAME", "VALUE"),
                     help="只保留 metrics.NAME < VAL, e.g. --below-metric best_val_mse 1.5")
     lp.add_argument("--format", choices=["table", "json"], default="table")
+    lp.add_argument("--metric", default="best_val_mse", metavar="NAME",
+                    help="表格里要展示的 metric 名 (default: best_val_mse). "
+                         "不影响 --above-metric / --below-metric 过滤, 也 "
+                         "不影响 --format json 的输出 (json 始终含 metrics 全字段).")
 
     cp = sub.add_parser("compare", parents=[quiet],
                         help="side-by-side diff 两个 run 的 manifest 字段")
@@ -718,7 +722,7 @@ def _cmd_list_runs(args: argparse.Namespace) -> int:
         return _err(str(e))
     return list_runs(
         root=args.root, dataset=args.dataset, model=args.model, variant=args.variant,
-        above_metric=above, below_metric=below, fmt=args.format,
+        above_metric=above, below_metric=below, metric=args.metric, fmt=args.format,
     )
 
 

@@ -95,9 +95,18 @@ def list_runs(
     variant: Optional[str] = None,
     above_metric: Optional[Tuple[str, float]] = None,
     below_metric: Optional[Tuple[str, float]] = None,
+    metric: str = "best_val_mse",
     fmt: str = "table",
 ) -> int:
-    """list-runs: 读 artifacts/, 过滤, 输出."""
+    """list-runs: 读 artifacts/, 过滤, 输出.
+
+    C4 — 新增 ``metric: str = "best_val_mse"``: 表格列用哪个 metric 名.
+    默认仍是 ``best_val_mse``, 旧 caller 行为不变. JSON 输出字段集合
+    不受 ``metric`` 参数影响 (json 永远携带 ``metrics`` 整 dict).
+
+    与 ``above_metric`` / ``below_metric`` 区别: 后两者是 filter (决定 *哪些*
+    行出现), ``metric`` 是显示 (决定 *展示的列*).
+    """
     rows = _apply_filters(
         _load_run_manifests(root),
         dataset=dataset, model=model, variant=variant,
@@ -115,17 +124,17 @@ def list_runs(
     if not rows:
         print(f"(no runs under {root} matching filters)")
         return 0
-    header = ("run_id", "dataset", "model", "variant", "best_val_mse", "epochs_to_best", "created_at")
+    header = ("run_id", "dataset", "model", "variant", metric, "epochs_to_best", "created_at")
     print("  ".join(f"{h:<22s}" if h != "run_id" else f"{h:<46s}" for h in header))
     for r in rows:
-        bv = r.metrics.get("best_val_mse")
-        bv_str = f"{bv:.4f}" if isinstance(bv, (int, float)) else "-"
+        mv = r.metrics.get(metric)
+        mv_str = f"{mv:.4f}" if isinstance(mv, (int, float)) else "-"
         eb = r.metrics.get("epochs_to_best")
         eb_str = str(eb) if eb is not None else "-"
         ca = r.created_at or "-"
         v = r.variant or "-"
         print(f"{r.run_id:<46s}  {r.dataset_alias:<22s}  {r.model_alias:<22s}  "
-              f"{v:<22s}  {bv_str:<22s}  {eb_str:<22s}  {ca}")
+              f"{v:<22s}  {mv_str:<22s}  {eb_str:<22s}  {ca}")
     return 0
 
 
